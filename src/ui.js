@@ -1,4 +1,4 @@
-// DOM rendering for the chat + model picker + download progress bar.
+// Modern, minimalist UI for the chat application
 // No framework. Returns a controller object the caller uses to push updates.
 
 /**
@@ -14,126 +14,121 @@
  *   onDownload: (modelId: string) => void,
  *   onDelete: (modelId: string) => void,
  *   onPromptPreset: (presetId: string) => void,
+ *   onStorageBackendChange: (id: string) => void,
  * }} handlers
  */
 export function mountChat(root, handlers) {
-  // ─── Status bar ────────────────────────────────────────────────────────
-  const webgpuEl = el('span', { id: 'status-webgpu', class: 'warn' }, 'WebGPU: checking…');
-  const engineEl = el('span', { id: 'status-engine', class: 'warn' }, 'Engine: idle');
+  // ─── Loading Overlay ───────────────────────────────────────────────────
+  const loadingOverlay = el('div', { class: 'loading-overlay', id: 'loading-overlay', hidden: '' });
 
-  // Storage is now an interactive selector. The "Cross-Origin Storage"
-  // option is disabled when the extension is not detected.
-  const storageSelect = el('select', {
-    id: 'storage-select',
-    class: 'storage-select',
-    'aria-label': 'Storage backend',
-  });
-  const storageInfoBtn = el('button', {
-    type: 'button',
-    class: 'storage-info',
-    'aria-label': 'About storage backends',
-    title: 'About storage backends',
-  }, 'ⓘ');
-  const storageEl = el('span', { id: 'status-storage', class: 'muted' },
-    el('span', { class: 'storage-key' }, 'Storage:'),
-    storageSelect,
-    storageInfoBtn,
+  const loadingHeader = el('div', { class: 'loading-header' },
+    el('span', { class: 'loading-spinner' }),
+    el('span', { class: 'loading-title' }, 'Loading...')
   );
 
-  // Popover that explains the two backends.
-  const popover = el('div', { class: 'popover', role: 'dialog', hidden: '' });
-  const popoverTitle = el('h3', { class: 'popover-title' });
-  const popoverBody = el('div', { class: 'popover-body' });
-  const popoverClose = el('button', { type: 'button', class: 'popover-close', 'aria-label': 'Close' }, '×');
+  const loadingSteps = el('div', { class: 'loading-steps' });
 
-  function renderPopover(crossOriginAvailable) {
-    popoverTitle.textContent = 'Storage backends';
-    popoverBody.replaceChildren(
-      el('p', { class: 'popover-lead' },
-        'Models live in your browser. Pick the backend that matches your setup.'),
-      el('div', { class: 'popover-block' },
-        el('h4', {}, 'Cache API'),
-        el('p', {}, 'Built into every browser. Per-origin, per-quota. Every site that uses the same model downloads its own copy.'),
-        el('p', { class: 'popover-meta ok' }, '✓ Always available.'),
-      ),
-      el('div', { class: 'popover-block' },
-        el('h4', {},
-          'Cross-Origin Storage ',
-          el('span', { class: 'badge-experimental' }, 'experimental'),
-        ),
-        el('p', {}, 'Proposed W3C API. Files are keyed by SHA-256, shared across sites, and verified by the browser on write. Cross-site dedup, larger pooled quota, no per-origin rate limits on Hugging Face.'),
-        crossOriginAvailable
-          ? el('p', { class: 'popover-meta ok' }, '✓ Chrome extension detected — option unlocked.')
-          : el('p', { class: 'popover-meta warn' },
-            'Extension not detected — option is disabled.',
-            el('br'),
-            el('a', {
-              href: 'https://chromewebstore.google.com/detail/cross-origin-storage/denpnpcgjgikjpoglpjefakmdcbmlgih',
-              target: '_blank',
-              rel: 'noopener',
-            }, 'Install Chrome extension →'),
-          ),
-        el('p', { class: 'popover-meta dim' },
-          'Native browser support is in the W3C proposal pipeline. Firefox / Safari adoption depends on each vendor.'),
-      ),
-      el('p', { class: 'popover-foot' },
-        'Switching backends does not migrate existing models — they stay where they were downloaded. New downloads go to the selected backend.'),
-    );
-  }
+  const stepsContainer = el('div', { class: 'steps-container' });
+  const loadingToggle = el('button', {
+    class: 'loading-toggle',
+    'aria-label': 'Toggle steps',
+    type: 'button'
+  }, '▼');
 
-  function openPopover(crossOriginAvailable) {
-    renderPopover(crossOriginAvailable);
-    popover.replaceChildren(popoverTitle, popoverClose, popoverBody);
-    popover.hidden = false;
-  }
-  function closePopover() {
-    popover.hidden = true;
-  }
-  storageInfoBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    if (popover.hidden) openPopover(currentCrossOriginAvailable);
-    else closePopover();
-  });
-  popoverClose.addEventListener('click', closePopover);
-  document.addEventListener('click', (e) => {
-    if (!popover.hidden && !popover.contains(e.target) && e.target !== storageInfoBtn) {
-      closePopover();
-    }
+  const stepsList = el('div', { class: 'steps-list' });
+
+  let stepsExpanded = true;
+
+  loadingToggle.addEventListener('click', () => {
+    stepsExpanded = !stepsExpanded;
+    stepsList.hidden = !stepsExpanded;
+    loadingToggle.textContent = stepsExpanded ? '▲' : '▼';
   });
 
-  // Track availability so the popover renders the right state without
-  // re-querying navigator every click.
-  let currentCrossOriginAvailable = false;
+  stepsContainer.append(loadingToggle, stepsList);
+  loadingSteps.append(stepsContainer);
+  loadingOverlay.append(loadingHeader, loadingSteps);
 
-  const statusBar = el('header', { class: 'status-bar' }, webgpuEl, engineEl, storageEl);
-  statusBar.append(popover);
+  // ─── Header ────────────────────────────────────────────────────────────
+  const modelBadge = el('span', { class: 'model-badge' }, 'Loading…');
+  const headerLeft = el('div', { class: 'header-left' },
+    el('h1', { class: 'app-title' }, 'Gemma Chat'),
+    modelBadge,
+  );
 
-  // ─── Model picker ──────────────────────────────────────────────────────
-  const modelSelect = el('select', { id: 'model-select', 'aria-label': 'Choose model' });
-  const modelLabel = el('label', { for: 'model-select' }, 'Model');
-  const modelStatus = el('span', { id: 'model-status', class: 'muted' }, '—');
-  const downloadBtn = el('button', { type: 'button', id: 'download-btn', class: 'primary' }, 'Download');
-  const deleteBtn = el('button', { type: 'button', id: 'delete-btn', class: 'danger' }, 'Delete cache');
+  // Simple SVG gear icon
+  const gearSvg = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+  </svg>`;
 
-  const progressTrack = el('div', { class: 'progress-track', hidden: '' });
+  const settingsBtn = el('button', { class: 'icon-btn', 'aria-label': 'Settings' });
+  settingsBtn.innerHTML = gearSvg;
+
+  const headerRight = el('div', { class: 'header-right' }, settingsBtn);
+  const header = el('header', { class: 'chat-header' }, headerLeft, headerRight);
+
+  // ─── Status Bar (below header) ────────────────────────────────────────
+  const statusDot = el('span', { class: 'status-dot' });
+  const statusText = el('span', { class: 'status-text' }, 'Initializing…');
+  const statusBar = el('div', { class: 'status-bar' }, statusDot, statusText);
+
+  // ─── Settings panel (collapsible) ─────────────────────────────────────
+  const settingsPanel = el('div', { class: 'settings-panel', hidden: '' });
+
+  // Model selector row
+  const modelSelect = el('select', { id: 'model-select', class: 'model-select' });
+  const modelRow = el('div', { class: 'settings-row' },
+    el('label', { for: 'model-select' }, 'Model'),
+    modelSelect,
+  );
+
+  // Storage selector row
+  const storageSelect = el('select', { id: 'storage-select', class: 'storage-select' });
+  const storageRow = el('div', { class: 'settings-row' },
+    el('label', { for: 'storage-select' }, 'Storage'),
+    storageSelect,
+  );
+
+  // System prompt row
+  const promptSelect = el('select', { id: 'prompt-select', class: 'prompt-select' });
+  const systemPrompt = el('textarea', {
+    id: 'system-prompt',
+    class: 'system-prompt-input',
+    rows: '3',
+    placeholder: 'System prompt…',
+  });
+  const promptRow = el('div', { class: 'settings-row settings-row--prompt' },
+    el('label', { for: 'prompt-select' }, 'Preset'),
+    promptSelect,
+    systemPrompt,
+  );
+
+  // Model status & actions
+  const modelStatus = el('span', { class: 'model-status-text' });
+  const downloadBtn = el('button', { class: 'btn btn-primary btn-sm', id: 'download-btn' }, 'Download');
+  const deleteBtn = el('button', { class: 'btn btn-danger btn-sm', id: 'delete-btn' }, 'Delete');
+  const modelActions = el('div', { class: 'model-actions' },
+    modelStatus,
+    downloadBtn,
+    deleteBtn,
+  );
+
+  // Progress bar with text above
+  const progressInfo = el('span', { class: 'progress-info', hidden: '' });
   const progressFill = el('div', { class: 'progress-fill' });
-  const progressText = el('span', { class: 'progress-text' }, '0%');
-  progressTrack.append(progressFill, progressText);
-
-  const modelPicker = el('section', { class: 'model-picker' },
-    modelLabel, modelSelect,
-    el('div', { class: 'model-picker-row' }, modelStatus, deleteBtn, downloadBtn),
+  const progressTrack = el('div', { class: 'progress-track', hidden: '' }, progressFill);
+  const progressContainer = el('div', { class: 'progress-container' },
+    progressInfo,
     progressTrack,
   );
 
-  // ─── System prompt (with preset dropdown) ──────────────────────────────
-  const promptSelect = el('select', { id: 'prompt-select', 'aria-label': 'System prompt preset' });
-  const promptLabel = el('label', { for: 'prompt-select' }, 'Preset');
-  const systemLabel = el('label', { for: 'system-prompt' }, 'System prompt');
-  const systemPrompt = el('textarea', { id: 'system-prompt', rows: '6' });
-  const systemSection = el('section', { class: 'system-prompt' },
-    el('div', { class: 'system-prompt-row' }, promptLabel, promptSelect),
-    systemLabel, systemPrompt,
+  settingsPanel.append(
+    modelRow,
+    storageRow,
+    promptRow,
+    modelActions,
+    progressContainer,
   );
 
   // ─── Messages ──────────────────────────────────────────────────────────
@@ -142,25 +137,137 @@ export function mountChat(root, handlers) {
   // ─── Composer ──────────────────────────────────────────────────────────
   const inputEl = el('textarea', {
     id: 'input',
-    rows: '2',
-    placeholder: 'Type a message and press Enter…',
+    class: 'composer-input',
+    rows: '1',
+    placeholder: 'Ask something…',
     'aria-label': 'Message',
   });
-  const resetBtn = el('button', { type: 'button', id: 'reset-btn', class: 'danger', disabled: '' }, 'Reset');
-  const cancelBtn = el('button', { type: 'button', id: 'cancel-btn', disabled: '' }, 'Cancel');
-  const sendBtn = el('button', { type: 'submit', id: 'send-btn', class: 'primary', disabled: '' }, 'Send');
+
+  const cancelBtn = el('button', {
+    type: 'button',
+    class: 'btn btn-ghost btn-sm',
+    id: 'cancel-btn',
+    disabled: '',
+  }, '✕');
+
+  const sendBtn = el('button', {
+    type: 'submit',
+    class: 'btn btn-primary btn-icon',
+    id: 'send-btn',
+    disabled: '',
+    'aria-label': 'Send',
+  }, '→');
+
+  const composerActions = el('div', { class: 'composer-actions' }, cancelBtn, sendBtn);
+
+  const resetBtn = el('button', {
+    type: 'button',
+    class: 'btn btn-ghost btn-sm',
+    id: 'reset-btn',
+  }, '↻ New');
+
+  const composerFooter = el('div', { class: 'composer-footer' }, resetBtn, composerActions);
+
   const composerEl = el('form', {
     id: 'composer',
     class: 'composer',
     autocomplete: 'off',
-  }, inputEl, el('div', { class: 'composer-actions' }, resetBtn, cancelBtn, sendBtn));
+  }, inputEl, composerFooter);
 
-  root.append(statusBar, modelPicker, systemSection, messagesEl, composerEl);
+  // ─── Assemble ──────────────────────────────────────────────────────────
+  root.append(loadingOverlay, header, statusBar, settingsPanel, messagesEl, composerEl);
 
   // ─── State ─────────────────────────────────────────────────────────────
   let engineReady = false;
   /** @type {string|null} */
   let activeModelId = null;
+  let settingsOpen = false;
+
+  // ─── Step management ───────────────────────────────────────────────────
+  const steps = [];
+
+  function addStep(id, label) {
+    const step = { id, label, status: 'pending', detail: '' };
+    steps.push(step);
+    renderSteps();
+    return step;
+  }
+
+  function updateStep(id, status, detail = '') {
+    const step = steps.find(s => s.id === id);
+    if (step) {
+      step.status = status;
+      if (detail) step.detail = detail;
+      renderSteps();
+    }
+  }
+
+  function renderSteps() {
+    const total = steps.length;
+    const done = steps.filter(s => s.status === 'done').length;
+    const active = steps.find(s => s.status === 'active');
+    const hasError = steps.some(s => s.status === 'error');
+
+    // Update header
+    const title = loadingHeader.querySelector('.loading-title');
+    if (hasError) {
+      title.textContent = '❌ Error loading';
+      loadingOverlay.classList.add('error');
+    } else if (done === total) {
+      title.textContent = '✅ Ready to chat!';
+      loadingOverlay.classList.add('complete');
+      setTimeout(() => {
+        loadingOverlay.classList.add('fade-out');
+        setTimeout(() => {
+          loadingOverlay.hidden = true;
+          loadingOverlay.classList.remove('fade-out');
+          document.body.style.overflow = '';
+        }, 500);
+      }, 1000);
+    } else {
+      title.textContent = active ? `⏳ ${active.label}` : '⏳ Loading...';
+      loadingOverlay.classList.remove('complete', 'error');
+    }
+
+    // Update toggle text
+    loadingToggle.textContent = stepsExpanded ? '▲' : '▼';
+
+    // Render steps
+    stepsList.replaceChildren();
+    for (const step of steps) {
+      const icons = { pending: '⬜', active: '⏳', done: '✅', error: '❌' };
+      const colors = { pending: '', active: 'active', done: 'done', error: 'error' };
+
+      const stepEl = el('div', {
+        class: `loading-step ${colors[step.status]}`,
+        'data-status': step.status
+      });
+
+      const icon = el('span', { class: 'step-icon' }, icons[step.status] || '⬜');
+      const label = el('span', { class: 'step-label' }, step.label);
+      const detail = step.detail ? el('span', { class: 'step-detail' }, step.detail) : null;
+
+      stepEl.append(icon, label);
+      if (detail) stepEl.append(detail);
+      stepsList.append(stepEl);
+    }
+
+    // Update progress count
+    stepsContainer.setAttribute('data-progress', `${done}/${total}`);
+  }
+
+  // ─── Toggle settings ──────────────────────────────────────────────────
+  settingsBtn.addEventListener('click', () => {
+    settingsOpen = !settingsOpen;
+    settingsPanel.hidden = !settingsOpen;
+    if (settingsOpen) {
+      settingsBtn.innerHTML = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
+        <path d="M18 6L6 18M6 6l12 12"/>
+      </svg>`;
+    } else {
+      settingsBtn.innerHTML = gearSvg;
+    }
+  });
 
   // ─── Helpers ───────────────────────────────────────────────────────────
   function scrollToBottom() {
@@ -168,79 +275,114 @@ export function mountChat(root, handlers) {
   }
 
   function appendMessage({ role, content }) {
-    const node = el('div', { class: `message message-${role}`, 'data-role': role });
-    node.textContent = content;
+    const avatar = role === 'user' ? 'U' : 'A';
+    const node = el('div', {
+      class: `message message-${role}`,
+      'data-role': role,
+    },
+      el('div', { class: 'message-avatar' }, avatar),
+      el('div', { class: 'message-content' }, content),
+    );
     messagesEl.append(node);
     scrollToBottom();
     return node;
   }
 
   function appendError(message) {
-    const node = el('div', { class: 'message message-error' });
-    node.textContent = message;
+    const node = el('div', { class: 'message message-error' },
+      el('span', { class: 'error-icon' }, '⚠️'),
+      el('span', {}, message),
+    );
     messagesEl.append(node);
     scrollToBottom();
     return node;
   }
 
   function appendStreamingMessage() {
-    const thinking = el('span', { class: 'thinking-dots', 'aria-label': 'Thinking' },
+    const thinking = el('span', { class: 'thinking-dots' },
       el('span'), el('span'), el('span'),
     );
     const node = el('div', {
       class: 'message message-assistant streaming',
       'data-role': 'assistant',
-    }, thinking);
+    },
+      el('div', { class: 'message-avatar' }, 'A'),
+      el('div', { class: 'message-content' }, thinking),
+    );
     messagesEl.append(node);
     scrollToBottom();
     return node;
   }
 
   function appendToMessage(node, chunk) {
-    // First chunk: replace the thinking indicator with actual content.
+    const content = node.querySelector('.message-content');
     if (!node.dataset.started) {
       node.dataset.started = 'true';
-      node.replaceChildren();
+      content.replaceChildren();
+      const cursor = document.createTextNode('▍');
+      content.appendChild(cursor);
     }
-    node.textContent += chunk;
+    const cursor = content.lastChild;
+    if (cursor && cursor.nodeType === Node.TEXT_NODE && cursor.textContent === '▍') {
+      content.insertBefore(document.createTextNode(chunk), cursor);
+    } else {
+      content.textContent += chunk;
+    }
     scrollToBottom();
   }
 
   function finishStreaming(node) {
     node?.classList.remove('streaming');
+    const content = node?.querySelector('.message-content');
+    if (content) {
+      const lastChild = content.lastChild;
+      if (lastChild && lastChild.nodeType === Node.TEXT_NODE && lastChild.textContent === '▍') {
+        content.removeChild(lastChild);
+      }
+    }
   }
 
   function setBusy(busy) {
     sendBtn.disabled = busy || !engineReady;
     inputEl.disabled = busy;
     cancelBtn.disabled = !busy;
-    systemPrompt.disabled = busy;
     resetBtn.disabled = busy || !engineReady;
+  }
+
+  function setAllDisabled(disabled) {
+    const elements = [
+      modelSelect, downloadBtn, deleteBtn, inputEl, sendBtn, cancelBtn, resetBtn,
+      promptSelect, storageSelect, systemPrompt, settingsBtn
+    ];
+    for (const el of elements) {
+      if (el) el.disabled = disabled;
+    }
   }
 
   function showProgress(visible) {
     progressTrack.hidden = !visible;
+    progressInfo.hidden = !visible;
     if (!visible) {
       progressFill.style.width = '0%';
-      progressText.textContent = '0%';
+      progressInfo.textContent = '';
     }
   }
 
   function setProgress(downloaded, total) {
     if (!total || total <= 0) {
       progressFill.style.width = '100%';
-      progressText.textContent = formatBytes(downloaded);
+      progressInfo.textContent = formatBytes(downloaded);
       return;
     }
     const pct = Math.min(100, (downloaded / total) * 100);
     progressFill.style.width = `${pct}%`;
-    progressText.textContent = `${pct.toFixed(1)}% · ${formatBytes(downloaded)} / ${formatBytes(total)}`;
+    progressInfo.textContent = `${pct.toFixed(0)}% · ${formatBytes(downloaded)} / ${formatBytes(total)}`;
   }
 
   function formatBytes(n) {
-    if (!Number.isFinite(n)) return '? MB';
+    if (!Number.isFinite(n)) return '?';
     const mb = n / 1024 / 1024;
-    return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(0)} MB`;
+    return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb.toFixed(0)} MB`;
   }
 
   // ─── Events ────────────────────────────────────────────────────────────
@@ -250,8 +392,14 @@ export function mountChat(root, handlers) {
     if (!text || !engineReady) return;
     appendMessage({ role: 'user', content: text });
     inputEl.value = '';
+    inputEl.style.height = 'auto';
     setBusy(true);
     handlers.onSend(text);
+  });
+
+  inputEl.addEventListener('input', () => {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = `${Math.min(inputEl.scrollHeight, 120)}px`;
   });
 
   inputEl.addEventListener('keydown', (e) => {
@@ -265,7 +413,7 @@ export function mountChat(root, handlers) {
 
   resetBtn.addEventListener('click', () => {
     if (!engineReady) return;
-    if (!confirm('Reset conversation? This clears the message history.')) return;
+    if (!confirm('Start a new conversation?')) return;
     handlers.onReset();
   });
 
@@ -282,8 +430,6 @@ export function mountChat(root, handlers) {
   });
 
   downloadBtn.addEventListener('click', () => {
-    // Fall back to whatever the dropdown shows so the button stays usable
-    // before init has finished (or if it never finishes).
     const id = activeModelId ?? modelSelect.value;
     if (!id) return;
     handlers.onDownload(id);
@@ -292,7 +438,7 @@ export function mountChat(root, handlers) {
   deleteBtn.addEventListener('click', () => {
     const id = activeModelId ?? modelSelect.value;
     if (!id) return;
-    if (!confirm('Delete this cached model? You will need to re-download it.')) return;
+    if (!confirm('Delete this cached model?')) return;
     handlers.onDelete(id);
   });
 
@@ -308,6 +454,37 @@ export function mountChat(root, handlers) {
 
   // ─── Public controller ─────────────────────────────────────────────────
   return {
+    // Loading overlay methods
+    showLoading() {
+      loadingOverlay.hidden = false;
+      loadingOverlay.classList.remove('fade-out', 'complete', 'error');
+      document.body.style.overflow = 'hidden';
+      setAllDisabled(true);
+    },
+
+    hideLoading() {
+      loadingOverlay.classList.add('fade-out');
+      document.body.style.overflow = '';
+      setTimeout(() => {
+        loadingOverlay.hidden = true;
+        loadingOverlay.classList.remove('fade-out');
+        setAllDisabled(false);
+      }, 500);
+    },
+
+    addSteps(stepDefs) {
+      steps.length = 0;
+      for (const def of stepDefs) {
+        addStep(def.id, def.label);
+      }
+      renderSteps();
+    },
+
+    updateStep(id, status, detail = '') {
+      updateStep(id, status, detail);
+    },
+
+    // Model methods
     setModels(entries) {
       modelSelect.replaceChildren();
       for (const m of entries) {
@@ -329,13 +506,6 @@ export function mountChat(root, handlers) {
       }
     },
 
-    getActivePromptId() {
-      return promptSelect.value;
-    },
-
-    /**
-     * Replace the textarea with a preset's text.
-     */
     loadPromptText(text) {
       systemPrompt.value = text ?? '';
     },
@@ -343,6 +513,8 @@ export function mountChat(root, handlers) {
     setActiveModel(modelId) {
       activeModelId = modelId;
       if (modelSelect.value !== modelId) modelSelect.value = modelId;
+      const model = modelSelect.options[modelSelect.selectedIndex]?.text || modelId;
+      modelBadge.textContent = model.split(' — ')[0] || modelId;
     },
 
     setModelStatus(label) {
@@ -350,13 +522,10 @@ export function mountChat(root, handlers) {
     },
 
     setModelStatusState(state) {
-      // state: 'available' | 'cached' | 'loaded' | 'downloading' | 'error'
       modelStatus.dataset.state = state;
       modelStatus.classList.toggle('is-loaded', state === 'loaded');
 
-      // Update the Download button label and styling per state so the user
-      // can tell at a glance whether re-downloading is needed.
-      downloadBtn.classList.remove('btn-primary', 'btn-ghost', 'btn-danger', 'btn-success-static');
+      downloadBtn.classList.remove('btn-primary', 'btn-ghost', 'btn-success');
       switch (state) {
         case 'available':
           downloadBtn.textContent = 'Download';
@@ -370,7 +539,7 @@ export function mountChat(root, handlers) {
           break;
         case 'loaded':
           downloadBtn.textContent = '✓ Loaded';
-          downloadBtn.classList.add('btn-success-static');
+          downloadBtn.classList.add('btn-success');
           downloadBtn.disabled = true;
           break;
         case 'downloading':
@@ -378,7 +547,7 @@ export function mountChat(root, handlers) {
           downloadBtn.disabled = true;
           break;
         case 'error':
-          downloadBtn.textContent = 'Retry download';
+          downloadBtn.textContent = 'Retry';
           downloadBtn.classList.add('btn-danger');
           downloadBtn.disabled = false;
           break;
@@ -392,63 +561,70 @@ export function mountChat(root, handlers) {
     setProgress,
 
     setWebGPU(state, label) {
-      webgpuEl.textContent = `WebGPU: ${label}`;
-      webgpuEl.className = state === 'ok' ? 'ok' : state === 'bad' ? 'bad' : 'warn';
+      const dotColors = { ok: '#22c55e', bad: '#ef4444', warn: '#f59e0b' };
+      statusDot.style.background = dotColors[state] || '#6b7280';
+      statusBar.className = `status-bar status-${state}`;
+      this.setStatus(label);
     },
 
     setEngine(state, label) {
-      engineEl.textContent = `Engine: ${label}`;
-      engineEl.className = state === 'ok' ? 'ok' : state === 'bad' ? 'bad' : 'warn';
+      const dotColors = { ok: '#22c55e', bad: '#ef4444', warn: '#f59e0b' };
+      statusDot.style.background = dotColors[state] || '#6b7280';
+      statusBar.className = `status-bar status-${state}`;
       engineReady = state === 'ok';
       setBusy(false);
+      this.setStatus(label);
     },
 
-    setStorageBackend(label, isCrossOrigin) {
-      // Kept for backwards compatibility with old callers — just updates the
-      // title attribute on the chip without touching the select.
-      storageEl.title = isCrossOrigin
-        ? 'Models are stored in Cross-Origin Storage — shared across sites and hash-verified.'
-        : 'Models are stored in the per-origin Cache API. Install the Cross-Origin Storage extension to enable cross-site dedup.';
+    setStatus(label) {
+      let displayText = label;
+
+      if (label && label.includes('supported')) {
+        displayText = '✅ WebGPU ready';
+      } else if (label && label.includes('unsupported')) {
+        displayText = '❌ WebGPU not available';
+      } else if (label && label.includes('checking')) {
+        displayText = '⏳ Checking WebGPU…';
+      } else if (label && label.includes('warming up')) {
+        displayText = '⏳ ' + label.replace('warming up', 'Loading');
+      } else if (label && label.includes('ready')) {
+        displayText = '✅ ' + label;
+      } else if (label && label.includes('error')) {
+        displayText = '❌ ' + label;
+      } else if (label && label.includes('thinking')) {
+        displayText = '🤔 ' + label;
+      } else if (label && label.includes('decoding')) {
+        displayText = '💬 ' + label;
+      } else if (label && label.includes('downloading')) {
+        displayText = '⬇️ ' + label;
+      } else if (label && label.includes('injecting')) {
+        displayText = '📝 ' + label;
+      } else if (label && label.includes('disabled')) {
+        displayText = '⛔ ' + label;
+      }
+
+      statusText.textContent = displayText;
     },
 
-    /**
-     * Populate the storage selector with the currently-available backends.
-     * The Cross-Origin Storage option is disabled (and labeled "extension not
-     * installed") when `crossOriginAvailable` is false.
-     * @param {{ crossOriginAvailable: boolean, preferred?: 'cache'|'cross-origin' }} opts
-     */
-    // In ui.js - Update setStorageAvailability to show the current selection
     setStorageAvailability({ crossOriginAvailable, preferred = 'cache' }) {
-      currentCrossOriginAvailable = !!crossOriginAvailable;
       storageSelect.replaceChildren();
+      storageSelect.append(el('option', { value: 'cache' }, 'Cache'));
 
-      // Cache API — always available.
-      storageSelect.append(el('option', { value: 'cache' }, 'Cache API'));
-
-      // Cross-Origin Storage — disabled without the extension.
-      const crossLabel = crossOriginAvailable
-        ? 'Cross-Origin Storage'
-        : 'Cross-Origin Storage (extension not installed)';
+      const crossLabel = crossOriginAvailable ? 'Cross-Origin' : 'Cross-Origin (disabled)';
       const crossOpt = el('option', { value: 'cross-origin' }, crossLabel);
       if (!crossOriginAvailable) crossOpt.disabled = true;
       storageSelect.append(crossOpt);
 
-      // Pick the active one based on preference
       const active = (preferred === 'cross-origin' && crossOriginAvailable) ? 'cross-origin' : 'cache';
       storageSelect.value = active;
-
-      // Show status color
-      storageEl.className = crossOriginAvailable ? 'ok' : 'warn';
-
-      // Update the display to show current selection
-      const selectedLabel = storageSelect.options[storageSelect.selectedIndex]?.text || 'Cache API';
-      storageEl.title = `Current storage: ${selectedLabel}`;
-
-      renderPopover(crossOriginAvailable);
     },
 
     getStorageBackend() {
       return storageSelect.value;
+    },
+
+    getModelId() {
+      return activeModelId ?? modelSelect.value;
     },
 
     appendMessage,

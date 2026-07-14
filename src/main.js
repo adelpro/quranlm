@@ -9,6 +9,7 @@ import {
   getCachedBlob,
   downloadModel,
   deleteCached,
+  validateModel,
   backendLabel,
   isCrossOriginStorageAvailable,
 } from './models.js';
@@ -16,27 +17,44 @@ import { DEFAULT_PROMPT_ID, listPrompts, getPrompt } from './prompts.js';
 
 const MAX_NUM_TOKENS = 8192;
 const STORAGE_KEY = 'litert-storage-backend';
+const MODEL_KEY = 'litert-selected-model';
 
 const appEl = document.getElementById('app');
 
-// Load stored preference or default to cross-origin if available
+// ─── Storage preference ──────────────────────────────────────────────────
 function loadStoredStoragePreference() {
   const stored = localStorage.getItem(STORAGE_KEY);
   if (stored === 'cache' || stored === 'cross-origin') {
     return stored;
   }
-  // Default to cross-origin if available, otherwise cache
   return isCrossOriginStorageAvailable() ? 'cross-origin' : 'cache';
 }
 
 let preferredStorage = loadStoredStoragePreference();
 
+// ─── Model selection persistence ────────────────────────────────────────
+function getStoredModel() {
+  const stored = localStorage.getItem(MODEL_KEY);
+  if (stored && MODELS[stored]) {
+    return stored;
+  }
+  return null;
+}
+
+function saveModelPreference(modelId) {
+  localStorage.setItem(MODEL_KEY, modelId);
+}
+
+// ─── Mount UI ─────────────────────────────────────────────────────────────
 const ui = mountChat(appEl, {
   onSend: (text) => { void sendMessage(text); },
   onCancel: () => session?.cancel(),
   onSystemPromptChange: (text) => { void applySystemPrompt(text); },
   onReset: () => { void resetConversation(); },
-  onModelSelect: (id) => { void selectModel(id); },
+  onModelSelect: (id) => {
+    saveModelPreference(id);
+    void selectModel(id);
+  },
   onDownload: (id) => { void downloadSelected(id); },
   onDelete: (id) => { void deleteSelected(id); },
   onPromptPreset: (id) => { void applyPromptPreset(id); },
@@ -55,8 +73,7 @@ function setPreferredStorage(id) {
   console.log('[litert] storage backend:', id);
 }
 
-// Populate the dropdowns immediately so the UI isn't empty while WebGPU is
-// being probed.
+// Populate the dropdowns immediately
 ui.setModels(Object.values(MODELS));
 ui.setStorageAvailability({
   crossOriginAvailable: isCrossOriginStorageAvailable(),
@@ -64,83 +81,113 @@ ui.setStorageAvailability({
 });
 ui.setPrompts(listPrompts(), DEFAULT_PROMPT_ID);
 
+// ─── Init ──────────────────────────────────────────────────────────────────
 (async function init() {
   console.log('[litert] init: start');
+
+  // Show loading overlay
+  ui.showLoading();
+
+  // Define steps
+  const stepDefs = [
+    { id: 'webgpu', label: 'WebGPU support' },
+    { id: 'models', label: 'Checking models' },
+    { id: 'loading', label: 'Loading model' },
+    { id: 'ready', label: 'Ready' }
+  ];
+
+  ui.addSteps(stepDefs);
+  ui.updateStep('webgpu', 'active');
+
   try {
+    // Step 2: WebGPU
     const gpu = await checkWebGPUSupport();
     console.log('[litert] WebGPU:', gpu);
+
     if (!gpu.supported) {
-      ui.setWebGPU('bad', `unsupported — ${gpu.reason}`);
-      ui.setEngine('bad', 'disabled');
-      for (const m of Object.values(MODELS)) {
-        try {
-          const cached = await isCached(m.id);
-          ui.setActiveModel(m.id);
-          ui.setModelStatus(cached ? 'cached (engine disabled)' : 'not downloaded');
-          ui.setModelStatusState(cached ? 'cached' : 'available');
-        } catch (err) {
-          ui.setModelStatus('error checking cache');
-          ui.setModelStatusState('error');
-        }
-      }
+      ui.updateStep('webgpu', 'error', 'Not supported');
+      ui.setWebGPU('bad', 'WebGPU not available');
+      ui.setEngine('bad', 'Engine disabled');
+      ui.hideLoading();
       return;
     }
-    ui.setWebGPU('ok', 'supported');
+    ui.updateStep('webgpu', 'done', 'Supported ✓');
+    ui.setWebGPU('ok', 'WebGPU ready');
 
-    // Pick a sensible default model (prefer the cached one).
-    let defaultId = Object.keys(MODELS)[0];
-    for (const m of Object.values(MODELS)) {
-      try {
-        const cached = await isCached(m.id);
-        if (cached) {
-          defaultId = m.id;
-          break;
-        }
-      } catch (err) {
-        console.debug(`[litert] Could not check cache for ${m.id}:`, err.message);
-      }
-    }
+    // Step 3: Models
+    ui.updateStep('models', 'active', 'Checking...');
+
+    // Get stored model preference
+    let defaultId = getStoredModel() || Object.keys(MODELS)[0];
     console.log('[litert] default model:', defaultId);
 
-    // Update UI for all models
-    for (const m of Object.values(MODELS)) {
-      ui.setActiveModel(m.id);
+    // Check ALL models with progress
+    const modelStatuses = {};
+    const modelIds = Object.keys(MODELS);
+
+    for (let i = 0; i < modelIds.length; i++) {
+      const id = modelIds[i];
+      const label = MODELS[id].label;
+      ui.updateStep('models', 'active', `${label} (${i + 1}/${modelIds.length})`);
+      ui.setActiveModel(id);
+
       try {
-        const cached = await isCached(m.id);
-        ui.setModelStatus(cached ? 'cached · click to load' : 'not downloaded');
-        ui.setModelStatusState(cached ? 'cached' : 'available');
+        const result = await validateModel(id);
+        modelStatuses[id] = result;
+
+        if (result.valid) {
+          ui.setModelStatus('cached ✓');
+          ui.setModelStatusState('cached');
+        } else if (result.exists && !result.valid) {
+          ui.setModelStatus('corrupted ✗');
+          ui.setModelStatusState('error');
+        } else {
+          ui.setModelStatus('not downloaded');
+          ui.setModelStatusState('available');
+        }
       } catch (err) {
-        console.debug(`[litert] Could not check cache for ${m.id}:`, err.message);
-        ui.setModelStatus('error checking cache');
+        console.debug(`[litert] Could not check cache for ${id}:`, err.message);
+        ui.setModelStatus('error');
         ui.setModelStatusState('error');
       }
     }
 
-    // Try to select the default model (if cached)
-    try {
-      const cached = await isCached(defaultId);
-      if (cached) {
-        await selectModel(defaultId);
-      } else {
-        ui.setEngine('warn', 'pick a model & download');
-        ui.setModelStatusState('available');
-      }
-    } catch (err) {
-      console.debug(`[litert] Could not load default model:`, err.message);
-      ui.setEngine('warn', 'pick a model & download');
+    ui.updateStep('models', 'done', `${modelIds.length} models checked`);
+
+    // Step 4: Load engine
+    if (modelStatuses[defaultId]?.valid) {
+      ui.updateStep('loading', 'active', 'Loading...');
+      await loadEngineFor(defaultId);
+    } else {
+      ui.updateStep('loading', 'error', 'Model not found');
+      ui.setActiveModel(defaultId);
+      ui.setEngine('warn', 'Select a model and download');
+      ui.setModelStatusState('available');
+      ui.setModelStatus('not downloaded — click Download');
     }
+
+    // Step 5: Ready
+    ui.updateStep('ready', 'done', 'Ready!');
+    ui.setEngine('ok', 'Ready');
+
+    // Hide loading after a moment
+    setTimeout(() => {
+      ui.hideLoading();
+    }, 1000);
 
     console.log('[litert] init: done');
   } catch (err) {
     console.error('[litert] init failed:', err);
-    ui.setEngine('warn', `init partially failed — ${err?.message ?? err}`);
+    ui.updateStep('ready', 'error', err.message);
+    ui.setEngine('bad', `Error: ${err.message}`);
+    setTimeout(() => {
+      ui.hideLoading();
+    }, 3000);
   }
 })();
 
-/**
- * Select a model: if cached, load the engine immediately; otherwise prompt
- * the user to download.
- */
+// ─── Model selection ──────────────────────────────────────────────────────
+
 async function selectModel(modelId) {
   if (!MODELS[modelId]) return;
 
@@ -154,33 +201,38 @@ async function selectModel(modelId) {
 
   ui.setActiveModel(modelId);
 
-  // Check if cached - with proper error handling
-  let cached = false;
+  // Check if cached and valid
+  let result;
   try {
-    cached = await isCached(modelId);
+    result = await validateModel(modelId);
   } catch (err) {
-    console.debug(`[litert] Cache check failed for ${modelId}:`, err.message);
-    // Continue - maybe it's not cached yet
+    console.debug(`[litert] Validation failed for ${modelId}:`, err.message);
+    ui.setEngine('warn', 'Check cache failed — try download');
+    ui.setModelStatusState('available');
+    ui.setModelStatus('error checking cache — try download');
+    return;
   }
 
-  if (!cached) {
-    ui.setEngine('warn', 'pick a model & download');
-    ui.setModelStatusState('available');
-    ui.setModelStatus('not downloaded — click Download');
+  if (!result.valid) {
+    if (result.exists) {
+      ui.setEngine('warn', 'Model corrupted — re-download');
+      ui.setModelStatusState('error');
+      ui.setModelStatus('corrupted — click Re-download');
+    } else {
+      ui.setEngine('warn', 'Select a model and download');
+      ui.setModelStatusState('available');
+      ui.setModelStatus('not downloaded — click Download');
+    }
     return;
   }
 
   await loadEngineFor(modelId);
 }
 
-/**
- * Stream a download into the Cache API, updating the progress bar,
- * then load the engine.
- */
 async function downloadSelected(modelId) {
   ui.setModelStatusState('downloading');
   ui.setModelStatus('starting download…');
-  ui.setEngine('warn', 'downloading model…');
+  ui.setEngine('warn', 'Downloading model…');
 
   try {
     const blob = await downloadModel(modelId, {
@@ -199,13 +251,16 @@ async function downloadSelected(modelId) {
     ui.setModelStatus(`cached · ${formatBytes(blob.size)}`);
     ui.setModelStatusState('cached');
 
+    // Save model preference
+    saveModelPreference(modelId);
+
     // Pass the blob straight to the engine
     await loadEngineFor(modelId, blob);
   } catch (err) {
     console.error('download failed:', err);
     ui.setModelStatusState('error');
     ui.setModelStatus(err?.message ?? String(err));
-    ui.setEngine('bad', `download error — ${err?.message ?? err}`);
+    ui.setEngine('bad', `Download error — ${err?.message ?? err}`);
   }
 }
 
@@ -216,17 +271,17 @@ async function deleteSelected(modelId) {
     session = null;
     currentModelId = null;
     ui.clearMessages();
-    ui.setEngine('warn', 'cache cleared — pick another model');
+    ui.setEngine('warn', 'Cache cleared — pick another model');
   }
   ui.setModelStatusState('available');
   ui.setModelStatus('not downloaded');
+  if (localStorage.getItem(MODEL_KEY) === modelId) {
+    localStorage.removeItem(MODEL_KEY);
+  }
 }
 
-/**
- * Load the LiteRT Engine for the given (cached) model.
- * If `blobOverride` is supplied (e.g. just-downloaded bytes), use that
- * directly instead of re-fetching from storage.
- */
+// ─── Load Engine ──────────────────────────────────────────────────────────
+
 async function loadEngineFor(modelId, blobOverride = null) {
   const source = blobOverride ?? await getCachedBlob(modelId);
   if (!source) {
@@ -235,45 +290,52 @@ async function loadEngineFor(modelId, blobOverride = null) {
     return;
   }
 
-  // The first-time engine init can take several seconds (model parse, shader
-  // compile, accelerator registration). Tick the elapsed time so the user
-  // sees the page isn't frozen.
   const t0 = performance.now();
   const label = MODELS[modelId].label;
-  ui.setEngine('warn', `warming up ${label}…`);
+
+  // Update loading step
+  ui.updateStep('loading', 'active', `Loading ${label}...`);
+  ui.setEngine('warn', `Loading ${label}…`);
   ui.setActiveModel(modelId);
   ui.setModelStatusState('cached');
   ui.setModelStatus(`loading · ${label}…`);
 
   const tick = setInterval(() => {
     const s = ((performance.now() - t0) / 1000).toFixed(1);
-    ui.setEngine('warn', `warming up ${label}… (${s}s)`);
+    const elapsed = Math.round((performance.now() - t0) / 1000);
+    ui.updateStep('loading', 'active', `${label} (${elapsed}s)`);
+    ui.setEngine('warn', `Loading ${label}… (${s}s)`);
     ui.setModelStatus(`loading · ${label}… (${s}s)`);
-  }, 250);
+  }, 500);
 
   try {
     const engine = await loadEngine({ modelUrl: source, maxNumTokens: MAX_NUM_TOKENS });
     session = new ChatSession(engine);
     currentModelId = modelId;
 
-    ui.setEngine('warn', 'injecting system prompt…');
-    ui.setModelStatus(`loading · ${label}… injecting prompt`);
+    ui.updateStep('loading', 'active', 'Setting up system prompt...');
+    ui.setEngine('warn', 'Setting up system prompt…');
+    ui.setModelStatus(`loading · ${label}… setting up`);
     await session.setSystemPrompt(ui.getSystemPrompt());
 
     clearInterval(tick);
     const total = ((performance.now() - t0) / 1000).toFixed(1);
-    ui.setEngine('ok', `ready · ${label} · ${total}s`);
+    ui.updateStep('loading', 'done', `${label} loaded in ${total}s`);
+    ui.setEngine('ok', `${label} loaded in ${total}s`);
     ui.setModelStatusState('loaded');
     ui.setModelStatus(`${label} · loaded in ${total}s`);
   } catch (err) {
     clearInterval(tick);
     console.error('engine init failed:', err);
-    ui.setEngine('bad', `error — ${err?.message ?? err}`);
+    ui.updateStep('loading', 'error', err.message);
+    ui.setEngine('bad', `Engine error — ${err?.message ?? err}`);
     ui.setModelStatusState('error');
     ui.setModelStatus(err?.message ?? 'engine init failed');
     session = null;
   }
 }
+
+// ─── Chat functions ──────────────────────────────────────────────────────
 
 async function applySystemPrompt(text) {
   if (!session) return;
@@ -308,30 +370,33 @@ async function sendMessage(text) {
 
   const assistantEl = ui.appendStreamingMessage();
   const t0 = performance.now();
-  ui.setEngine('warn', 'thinking…');
+  ui.setEngine('warn', 'Thinking…');
   try {
     for await (const chunk of session.sendStream(text)) {
       if (assistantEl.dataset.started !== 'true') {
         const firstToken = ((performance.now() - t0) / 1000).toFixed(1);
-        ui.setEngine('ok', `decoding · first token ${firstToken}s`);
+        ui.setEngine('ok', `First token in ${firstToken}s`);
       }
       ui.appendToMessage(assistantEl, chunk);
     }
     const total = ((performance.now() - t0) / 1000).toFixed(1);
-    ui.setEngine('ok', `ready · ${MODELS[currentModelId ?? '']?.label ?? ''} · replied in ${total}s`);
+    ui.setEngine('ok', `Reply complete · ${total}s`);
   } catch (err) {
     console.error('sendStream failed:', err);
     ui.appendError(`Generation error: ${err?.message ?? err}`);
-    ui.setEngine('bad', `error — ${err?.message ?? err}`);
+    ui.setEngine('bad', `Error — ${err?.message ?? err}`);
   } finally {
     ui.finishStreaming(assistantEl);
     ui.setBusy(false);
   }
 }
 
+// ─── Cleanup ──────────────────────────────────────────────────────────────
+
 window.addEventListener('pagehide', () => { session?.dispose(); });
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────
+
 function formatBytes(n) {
   if (!Number.isFinite(n)) return '? MB';
   const mb = n / 1024 / 1024;
