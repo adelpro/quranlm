@@ -41,10 +41,10 @@ export function mountChat(root, handlers) {
   );
 
   // Popover that explains the two backends.
-  const popover       = el('div', { class: 'popover', role: 'dialog', hidden: '' });
-  const popoverTitle  = el('h3', { class: 'popover-title' });
-  const popoverBody   = el('div',  { class: 'popover-body' });
-  const popoverClose  = el('button', { type: 'button', class: 'popover-close', 'aria-label': 'Close' }, '×');
+  const popover = el('div', { class: 'popover', role: 'dialog', hidden: '' });
+  const popoverTitle = el('h3', { class: 'popover-title' });
+  const popoverBody = el('div', { class: 'popover-body' });
+  const popoverClose = el('button', { type: 'button', class: 'popover-close', 'aria-label': 'Close' }, '×');
 
   function renderPopover(crossOriginAvailable) {
     popoverTitle.textContent = 'Storage backends';
@@ -65,14 +65,14 @@ export function mountChat(root, handlers) {
         crossOriginAvailable
           ? el('p', { class: 'popover-meta ok' }, '✓ Chrome extension detected — option unlocked.')
           : el('p', { class: 'popover-meta warn' },
-              'Extension not detected — option is disabled.',
-              el('br'),
-              el('a', {
-                href: 'https://chromewebstore.google.com/detail/cross-origin-storage/denpnpcgjgikjpoglpjefakmdcbmlgih',
-                target: '_blank',
-                rel: 'noopener',
-              }, 'Install Chrome extension →'),
-            ),
+            'Extension not detected — option is disabled.',
+            el('br'),
+            el('a', {
+              href: 'https://chromewebstore.google.com/detail/cross-origin-storage/denpnpcgjgikjpoglpjefakmdcbmlgih',
+              target: '_blank',
+              rel: 'noopener',
+            }, 'Install Chrome extension →'),
+          ),
         el('p', { class: 'popover-meta dim' },
           'Native browser support is in the W3C proposal pipeline. Firefox / Safari adoption depends on each vendor.'),
       ),
@@ -110,14 +110,14 @@ export function mountChat(root, handlers) {
 
   // ─── Model picker ──────────────────────────────────────────────────────
   const modelSelect = el('select', { id: 'model-select', 'aria-label': 'Choose model' });
-  const modelLabel  = el('label', { for: 'model-select' }, 'Model');
+  const modelLabel = el('label', { for: 'model-select' }, 'Model');
   const modelStatus = el('span', { id: 'model-status', class: 'muted' }, '—');
   const downloadBtn = el('button', { type: 'button', id: 'download-btn', class: 'primary' }, 'Download');
-  const deleteBtn   = el('button', { type: 'button', id: 'delete-btn',   class: 'danger'  }, 'Delete cache');
+  const deleteBtn = el('button', { type: 'button', id: 'delete-btn', class: 'danger' }, 'Delete cache');
 
   const progressTrack = el('div', { class: 'progress-track', hidden: '' });
-  const progressFill  = el('div', { class: 'progress-fill' });
-  const progressText  = el('span', { class: 'progress-text' }, '0%');
+  const progressFill = el('div', { class: 'progress-fill' });
+  const progressText = el('span', { class: 'progress-text' }, '0%');
   progressTrack.append(progressFill, progressText);
 
   const modelPicker = el('section', { class: 'model-picker' },
@@ -128,8 +128,8 @@ export function mountChat(root, handlers) {
 
   // ─── System prompt (with preset dropdown) ──────────────────────────────
   const promptSelect = el('select', { id: 'prompt-select', 'aria-label': 'System prompt preset' });
-  const promptLabel  = el('label', { for: 'prompt-select' }, 'Preset');
-  const systemLabel  = el('label', { for: 'system-prompt' }, 'System prompt');
+  const promptLabel = el('label', { for: 'prompt-select' }, 'Preset');
+  const systemLabel = el('label', { for: 'system-prompt' }, 'System prompt');
   const systemPrompt = el('textarea', { id: 'system-prompt', rows: '6' });
   const systemSection = el('section', { class: 'system-prompt' },
     el('div', { class: 'system-prompt-row' }, promptLabel, promptSelect),
@@ -146,9 +146,9 @@ export function mountChat(root, handlers) {
     placeholder: 'Type a message and press Enter…',
     'aria-label': 'Message',
   });
-  const resetBtn  = el('button', { type: 'button', id: 'reset-btn',  class: 'danger',  disabled: '' }, 'Reset');
+  const resetBtn = el('button', { type: 'button', id: 'reset-btn', class: 'danger', disabled: '' }, 'Reset');
   const cancelBtn = el('button', { type: 'button', id: 'cancel-btn', disabled: '' }, 'Cancel');
-  const sendBtn   = el('button', { type: 'submit', id: 'send-btn',   class: 'primary', disabled: '' }, 'Send');
+  const sendBtn = el('button', { type: 'submit', id: 'send-btn', class: 'primary', disabled: '' }, 'Send');
   const composerEl = el('form', {
     id: 'composer',
     class: 'composer',
@@ -211,11 +211,11 @@ export function mountChat(root, handlers) {
   }
 
   function setBusy(busy) {
-    sendBtn.disabled      = busy || !engineReady;
-    inputEl.disabled      = busy;
-    cancelBtn.disabled    = !busy;
+    sendBtn.disabled = busy || !engineReady;
+    inputEl.disabled = busy;
+    cancelBtn.disabled = !busy;
     systemPrompt.disabled = busy;
-    resetBtn.disabled     = busy || !engineReady;
+    resetBtn.disabled = busy || !engineReady;
   }
 
   function showProgress(visible) {
@@ -398,7 +398,7 @@ export function mountChat(root, handlers) {
 
     setEngine(state, label) {
       engineEl.textContent = `Engine: ${label}`;
-      engineEl.className  = state === 'ok' ? 'ok' : state === 'bad' ? 'bad' : 'warn';
+      engineEl.className = state === 'ok' ? 'ok' : state === 'bad' ? 'bad' : 'warn';
       engineReady = state === 'ok';
       setBusy(false);
     },
@@ -417,6 +417,7 @@ export function mountChat(root, handlers) {
      * installed") when `crossOriginAvailable` is false.
      * @param {{ crossOriginAvailable: boolean, preferred?: 'cache'|'cross-origin' }} opts
      */
+    // In ui.js - Update setStorageAvailability to show the current selection
     setStorageAvailability({ crossOriginAvailable, preferred = 'cache' }) {
       currentCrossOriginAvailable = !!crossOriginAvailable;
       storageSelect.replaceChildren();
@@ -432,12 +433,17 @@ export function mountChat(root, handlers) {
       if (!crossOriginAvailable) crossOpt.disabled = true;
       storageSelect.append(crossOpt);
 
-      // Pick the active one. Default to cache; fall back to cache if the
-      // requested preferred backend isn't available.
+      // Pick the active one based on preference
       const active = (preferred === 'cross-origin' && crossOriginAvailable) ? 'cross-origin' : 'cache';
       storageSelect.value = active;
 
+      // Show status color
       storageEl.className = crossOriginAvailable ? 'ok' : 'warn';
+
+      // Update the display to show current selection
+      const selectedLabel = storageSelect.options[storageSelect.selectedIndex]?.text || 'Cache API';
+      storageEl.title = `Current storage: ${selectedLabel}`;
+
       renderPopover(crossOriginAvailable);
     },
 

@@ -15,8 +15,21 @@ import {
 import { DEFAULT_PROMPT_ID, listPrompts, getPrompt } from './prompts.js';
 
 const MAX_NUM_TOKENS = 8192;
+const STORAGE_KEY = 'litert-storage-backend';
 
 const appEl = document.getElementById('app');
+
+// Load stored preference or default to cross-origin if available
+function loadStoredStoragePreference() {
+  const stored = localStorage.getItem(STORAGE_KEY);
+  if (stored === 'cache' || stored === 'cross-origin') {
+    return stored;
+  }
+  // Default to cross-origin if available, otherwise cache
+  return isCrossOriginStorageAvailable() ? 'cross-origin' : 'cache';
+}
+
+let preferredStorage = loadStoredStoragePreference();
 
 const ui = mountChat(appEl, {
   onSend: (text) => { void sendMessage(text); },
@@ -34,19 +47,21 @@ const ui = mountChat(appEl, {
 let session = null;
 /** @type {string|null} */
 let currentModelId = null;
-/** @type {'cache' | 'cross-origin'} */
-let preferredStorage = 'cache';
 
 function setPreferredStorage(id) {
   if (id !== 'cache' && id !== 'cross-origin') return;
   preferredStorage = id;
+  localStorage.setItem(STORAGE_KEY, id);
   console.log('[litert] storage backend:', id);
 }
 
 // Populate the dropdowns immediately so the UI isn't empty while WebGPU is
 // being probed.
 ui.setModels(Object.values(MODELS));
-ui.setStorageAvailability({ crossOriginAvailable: isCrossOriginStorageAvailable() });
+ui.setStorageAvailability({
+  crossOriginAvailable: isCrossOriginStorageAvailable(),
+  preferred: preferredStorage
+});
 ui.setPrompts(listPrompts(), DEFAULT_PROMPT_ID);
 
 (async function init() {
@@ -57,12 +72,16 @@ ui.setPrompts(listPrompts(), DEFAULT_PROMPT_ID);
     if (!gpu.supported) {
       ui.setWebGPU('bad', `unsupported — ${gpu.reason}`);
       ui.setEngine('bad', 'disabled');
-      // Still allow browsing models — they might work on another machine.
       for (const m of Object.values(MODELS)) {
-        const cached = await isCached(m.id);
-        ui.setActiveModel(m.id);
-        ui.setModelStatus(cached ? 'cached (engine disabled)' : 'not downloaded');
-        ui.setModelStatusState(cached ? 'cached' : 'available');
+        try {
+          const cached = await isCached(m.id);
+          ui.setActiveModel(m.id);
+          ui.setModelStatus(cached ? 'cached (engine disabled)' : 'not downloaded');
+          ui.setModelStatusState(cached ? 'cached' : 'available');
+        } catch (err) {
+          ui.setModelStatus('error checking cache');
+          ui.setModelStatusState('error');
+        }
       }
       return;
     }
@@ -71,22 +90,50 @@ ui.setPrompts(listPrompts(), DEFAULT_PROMPT_ID);
     // Pick a sensible default model (prefer the cached one).
     let defaultId = Object.keys(MODELS)[0];
     for (const m of Object.values(MODELS)) {
-      if (await isCached(m.id)) { defaultId = m.id; break; }
+      try {
+        const cached = await isCached(m.id);
+        if (cached) {
+          defaultId = m.id;
+          break;
+        }
+      } catch (err) {
+        console.debug(`[litert] Could not check cache for ${m.id}:`, err.message);
+      }
     }
     console.log('[litert] default model:', defaultId);
 
+    // Update UI for all models
     for (const m of Object.values(MODELS)) {
       ui.setActiveModel(m.id);
-      const cached = await isCached(m.id);
-      ui.setModelStatus(cached ? 'cached · click to load' : 'not downloaded');
-      ui.setModelStatusState(cached ? 'cached' : 'available');
+      try {
+        const cached = await isCached(m.id);
+        ui.setModelStatus(cached ? 'cached · click to load' : 'not downloaded');
+        ui.setModelStatusState(cached ? 'cached' : 'available');
+      } catch (err) {
+        console.debug(`[litert] Could not check cache for ${m.id}:`, err.message);
+        ui.setModelStatus('error checking cache');
+        ui.setModelStatusState('error');
+      }
     }
 
-    await selectModel(defaultId);
+    // Try to select the default model (if cached)
+    try {
+      const cached = await isCached(defaultId);
+      if (cached) {
+        await selectModel(defaultId);
+      } else {
+        ui.setEngine('warn', 'pick a model & download');
+        ui.setModelStatusState('available');
+      }
+    } catch (err) {
+      console.debug(`[litert] Could not load default model:`, err.message);
+      ui.setEngine('warn', 'pick a model & download');
+    }
+
     console.log('[litert] init: done');
   } catch (err) {
     console.error('[litert] init failed:', err);
-    ui.setEngine('bad', `init failed — ${err?.message ?? err}`);
+    ui.setEngine('warn', `init partially failed — ${err?.message ?? err}`);
   }
 })();
 
@@ -106,7 +153,16 @@ async function selectModel(modelId) {
   }
 
   ui.setActiveModel(modelId);
-  const cached = await isCached(modelId);
+
+  // Check if cached - with proper error handling
+  let cached = false;
+  try {
+    cached = await isCached(modelId);
+  } catch (err) {
+    console.debug(`[litert] Cache check failed for ${modelId}:`, err.message);
+    // Continue - maybe it's not cached yet
+  }
+
   if (!cached) {
     ui.setEngine('warn', 'pick a model & download');
     ui.setModelStatusState('available');
@@ -143,8 +199,7 @@ async function downloadSelected(modelId) {
     ui.setModelStatus(`cached · ${formatBytes(blob.size)}`);
     ui.setModelStatusState('cached');
 
-    // Pass the blob straight to the engine — don't re-fetch from storage,
-    // since the Cross-Origin Storage write may have silently failed.
+    // Pass the blob straight to the engine
     await loadEngineFor(modelId, blob);
   } catch (err) {
     console.error('download failed:', err);

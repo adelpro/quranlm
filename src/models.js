@@ -14,6 +14,18 @@
 
 const CACHE_NAME = 'litert-models-v1';
 
+async function sha256(message) {
+  // Convert string to Uint8Array
+  const encoder = new TextEncoder();
+  const data = encoder.encode(message);
+
+  // Use SubtleCrypto to compute SHA-256
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  const hashHex = hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+  return hashHex;
+}
+
 /**
  * @typedef {Object} ModelEntry
  * @property {string} id
@@ -78,17 +90,30 @@ function hashFor(entry) {
  * @param {ModelEntry} entry
  * @returns {Promise<Blob | null>}
  */
+/**
+ * Try to read a stored File from Cross-Origin Storage. Returns null if the
+ * backend is unavailable or the file isn't there.
+ * @param {ModelEntry | string} entry - Model entry or hash string
+ * @returns {Promise<Blob | null>}
+ */
 async function readCrossOrigin(entry) {
   if (!isCrossOriginStorageAvailable()) return null;
+
+  let hashObj;
+  if (typeof entry === 'string') {
+    // If we got a hash string, create a hash object
+    hashObj = { algorithm: 'SHA-256', value: entry };
+  } else {
+    hashObj = hashFor(entry);
+  }
+
   try {
     const handle = await withTimeout(
-      navigator.crossOriginStorage.requestFileHandle(hashFor(entry)),
+      navigator.crossOriginStorage.requestFileHandle(hashObj),
       8000,
       'crossOriginStorage.requestFileHandle() timed out after 8s',
     );
     if (!handle) return null;
-    // Some extension builds return a handle whose getFile isn't a function
-    // (or throws synchronously). Guard so we can still fall back to HTTP.
     if (typeof handle.getFile !== 'function') {
       console.warn('crossOriginStorage: handle has no getFile(); falling back to HTTP');
       return null;
@@ -96,7 +121,10 @@ async function readCrossOrigin(entry) {
     const file = await handle.getFile();
     return file ?? null;
   } catch (err) {
-    console.warn('crossOriginStorage read failed:', err);
+    // Don't log "not found" errors as warnings - they're expected
+    if (!err?.message?.includes('not found')) {
+      console.warn('crossOriginStorage read failed:', err);
+    }
     return null;
   }
 }
@@ -106,11 +134,24 @@ async function readCrossOrigin(entry) {
  * @param {ModelEntry} entry
  * @param {Blob} blob
  */
+/**
+ * Write a Blob to Cross-Origin Storage, keyed by SHA-256.
+ * @param {ModelEntry | string} entry - Model entry or hash string
+ * @param {Blob} blob
+ */
 async function writeCrossOrigin(entry, blob) {
   if (!isCrossOriginStorageAvailable()) return;
+
+  let hashObj;
+  if (typeof entry === 'string') {
+    hashObj = { algorithm: 'SHA-256', value: entry };
+  } else {
+    hashObj = hashFor(entry);
+  }
+
   try {
     const handle = await navigator.crossOriginStorage.requestFileHandle(
-      hashFor(entry),
+      hashObj,
       { create: true, origins: '*' },
     );
     if (!handle) return;
@@ -121,7 +162,6 @@ async function writeCrossOrigin(entry, blob) {
     console.warn('crossOriginStorage write failed:', err);
   }
 }
-
 async function deleteCrossOrigin(entry) {
   if (!isCrossOriginStorageAvailable()) return;
   try {
@@ -177,21 +217,81 @@ async function deleteCache(entry) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** @returns {Promise<boolean>} */
+/** @returns {Promise<boolean>} */
 export async function isCached(modelId) {
-  const entry = MODELS[modelId];
-  if (!entry) return false;
-  return (await readCrossOrigin(entry)) != null || (await readCache(entry)) != null;
-}
+  const model = MODELS[modelId];
+  if (!model) return false;
 
+  // Try cross-origin storage first if available
+  if (isCrossOriginStorageAvailable()) {
+    try {
+      const file = await readCrossOrigin(model);
+      if (file) return true;
+    } catch (err) {
+      // If it's a "not found" error, that's fine - just continue to Cache API
+      if (!err?.message?.includes('not found')) {
+        console.debug('[models] Cross-origin storage error:', err.message);
+      }
+      // Continue to Cache API fallback
+    }
+  }
+
+  // Fallback to Cache API
+  try {
+    const cache = await caches.open('litert-models');
+    const response = await cache.match(model.url);
+    if (response) {
+      return true;
+    }
+  } catch (err) {
+    console.debug('[models] Cache API error:', err.message);
+  }
+
+  return false;
+}
+/**
+ * Look up a cached Blob. Prefers Cross-Origin Storage, falls back to Cache API.
+ * @param {string} modelId
+ * @returns {Promise<Blob | null>}
+ */
 /**
  * Look up a cached Blob. Prefers Cross-Origin Storage, falls back to Cache API.
  * @param {string} modelId
  * @returns {Promise<Blob | null>}
  */
 export async function getCachedBlob(modelId) {
-  const entry = MODELS[modelId];
-  if (!entry) return null;
-  return (await readCrossOrigin(entry)) ?? (await readCache(entry));
+  const model = MODELS[modelId];
+  if (!model) return null;
+
+  // Try cross-origin storage first
+  if (isCrossOriginStorageAvailable()) {
+    try {
+      const file = await readCrossOrigin(model);
+      if (file) {
+        console.log('[models] Found in cross-origin storage');
+        return file;
+      }
+    } catch (err) {
+      if (!err?.message?.includes('not found')) {
+        console.warn('[models] Cross-origin storage read failed:', err);
+      }
+      // Continue to Cache API
+    }
+  }
+
+  // Fallback to Cache API
+  try {
+    const cache = await caches.open('litert-models');
+    const response = await cache.match(model.url);
+    if (response) {
+      console.log('[models] Found in Cache API');
+      return await response.blob();
+    }
+  } catch (err) {
+    console.warn('[models] Cache API read failed:', err);
+  }
+
+  return null;
 }
 
 /** Which backend served the lookup — for surfacing in the UI. */
@@ -239,73 +339,89 @@ export async function deleteCached(modelId) {
  * }} [opts]
  * @returns {Promise<Blob>}
  */
-export async function downloadModel(modelId, opts = {}) {
-  const { onProgress, signal, preferredStorage = 'cache' } = opts;
-  const entry = MODELS[modelId];
-  if (!entry) throw new Error(`Unknown model: ${modelId}`);
+/**
+ * Download a model into the preferred storage backend and return a Blob ready
+ * for `Engine.create({ model })`. Reads always check both backends (so a model
+ * downloaded with a previous preference still works); writes go to the
+ * currently-selected backend.
+ *
+ * @param {string} modelId
+ * @param {{
+ *   onProgress?: (p: ProgressInfo) => void,
+ *   signal?: AbortSignal,
+ *   preferredStorage?: 'cache' | 'cross-origin' | 'both',
+ * }} [opts]
+ * @returns {Promise<Blob>}
+ */
+export async function downloadModel(modelId, options = {}) {
+  const model = MODELS[modelId];
+  if (!model) throw new Error(`Unknown model: ${modelId}`);
 
-  // Already cached anywhere? Reuse without touching the network.
-  const existing = await getCachedBlob(modelId);
-  if (existing) {
-    onProgress?.({ downloaded: existing.size, total: existing.size, done: true });
-    return existing;
+  const { onProgress, preferredStorage = 'cache' } = options;
+
+  // Determine which storage to use
+  const useCrossOrigin = preferredStorage === 'cross-origin' && isCrossOriginStorageAvailable();
+
+  // Download the model
+  const response = await fetch(model.url, { redirect: 'follow' });
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
   }
 
-  const res = await fetch(entry.url, { signal });
-  if (!res.ok) {
-    throw new Error(
-      `HTTP ${res.status} ${res.statusText} — ${entry.url}\n` +
-      `If the URL has changed, update MODELS in src/models.js.`,
-    );
-  }
-  if (!res.body) throw new Error('Response had no body');
+  const contentLength = response.headers.get('content-length');
+  const total = contentLength ? parseInt(contentLength, 10) : null;
+  const reader = response.body.getReader();
 
-  const declaredTotal = Number(res.headers.get('content-length')) || null;
-  const total = declaredTotal ?? entry.approxSize ?? null;
-
-  const reader = res.body.getReader();
+  // Collect chunks
   const chunks = [];
   let downloaded = 0;
-  let lastEmit = 0;
 
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      downloaded += value.byteLength;
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
 
-      const now = Date.now();
-      if (now - lastEmit > 100) {
-        onProgress?.({ downloaded, total });
-        lastEmit = now;
-      }
+    chunks.push(value);
+    downloaded += value.length;
+
+    if (onProgress) {
+      onProgress({ downloaded, total });
     }
+  }
+
+  // Combine chunks into a single Blob
+  const blob = new Blob(chunks);
+
+  // Store in the selected backend
+  if (useCrossOrigin) {
+    try {
+      await writeCrossOrigin(model, blob);
+      console.log('[models] Stored in cross-origin storage');
+    } catch (err) {
+      console.warn('[models] Failed to write to cross-origin storage, falling back to Cache API:', err);
+      // Fallback to Cache API
+      await storeInCache(model.url, blob);
+    }
+  } else {
+    // Store in Cache API
+    await storeInCache(model.url, blob);
+  }
+
+  return blob;
+}
+
+// Helper function to store in Cache API
+async function storeInCache(url, blob) {
+  try {
+    const cache = await caches.open('litert-models');
+    const response = new Response(blob, {
+      headers: { 'Content-Type': 'application/octet-stream' }
+    });
+    await cache.put(url, response);
+    console.log('[models] Stored in Cache API');
   } catch (err) {
-    reader.cancel().catch(() => {});
+    console.error('[models] Failed to store in Cache API:', err);
     throw err;
   }
-
-  const blob = new Blob(chunks, { type: 'application/octet-stream' });
-  chunks.length = 0;
-
-  // Verify integrity against the LFS-declared SHA-256 before persisting.
-  await verifySha256(blob, entry.sha256).catch((err) => {
-    throw new Error(`SHA-256 mismatch for ${entry.filename}: ${err.message}`);
-  });
-
-  // Persist to the preferred backend. Cross-Origin Storage is always written
-  // first when selected so the globally-shared copy is available even if the
-  // local Cache API write fails.
-  if (preferredStorage === 'cross-origin' || preferredStorage === 'both') {
-    await writeCrossOrigin(entry, blob);
-  }
-  if (preferredStorage === 'cache' || preferredStorage === 'both') {
-    await writeCache(entry, blob);
-  }
-
-  onProgress?.({ downloaded: blob.size, total: blob.size, done: true });
-  return blob;
 }
 
 /**

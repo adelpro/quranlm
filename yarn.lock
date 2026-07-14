@@ -512,6 +512,13 @@ __metadata:
   languageName: node
   linkType: hard
 
+"fuse.js@npm:^7.0.0":
+  version: 7.4.2
+  resolution: "fuse.js@npm:7.4.2"
+  checksum: 10c0/b83e50e0cdbeca995ea373e19569c7d89a8a9af64e5752cc23d06e823332a699a5f14f0c6e4036f7e2b4cbd9ed960761cec6b20ea8a3bf3905b1af0cfa296447
+  languageName: node
+  linkType: hard
+
 "graceful-fs@npm:^4.2.6":
   version: 4.2.11
   resolution: "graceful-fs@npm:4.2.11"
@@ -531,6 +538,7 @@ __metadata:
   resolution: "litert-lm-experiment@workspace:."
   dependencies:
     "@litert-lm/core": "npm:*"
+    quran-search-engine: "npm:^0.3.2"
     vite: "npm:^5.4.0"
   languageName: unknown
   linkType: soft
@@ -620,6 +628,15 @@ __metadata:
   version: 7.0.0
   resolution: "proc-log@npm:7.0.0"
   checksum: 10c0/b89c2d862604f35fec795477b0c7e376feab3ba0d4f4d291c4e959567442697cf451ac557d0623c1cc38af45a78128b983410f397a10c5d3a67f76c33de4754b
+  languageName: node
+  linkType: hard
+
+"quran-search-engine@npm:^0.3.2":
+  version: 0.3.2
+  resolution: "quran-search-engine@npm:0.3.2"
+  dependencies:
+    fuse.js: "npm:^7.0.0"
+  checksum: 10c0/48681492bf3bd616a2d4cc7240643c2d82c6d2e7afe75f20fdf3732f59526e447fa5be370ea72ea3f3f258bf1c01d1f5971d7aec735ddb181eb2ee26d948b6e9
   languageName: node
   linkType: hard
 
