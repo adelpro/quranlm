@@ -18,18 +18,102 @@
  */
 export function mountChat(root, handlers) {
   // ─── Status bar ────────────────────────────────────────────────────────
-  const statusBar = el('header', { class: 'status-bar' });
   const webgpuEl = el('span', { id: 'status-webgpu', class: 'warn' }, 'WebGPU: checking…');
   const engineEl = el('span', { id: 'status-engine', class: 'warn' }, 'Engine: idle');
-  const storageEl = el('span', { id: 'status-storage', class: 'muted' }, 'Storage: …');
-  statusBar.append(webgpuEl, engineEl, storageEl);
+
+  // Storage is now an interactive selector. The "Cross-Origin Storage"
+  // option is disabled when the extension is not detected.
+  const storageSelect = el('select', {
+    id: 'storage-select',
+    class: 'storage-select',
+    'aria-label': 'Storage backend',
+  });
+  const storageInfoBtn = el('button', {
+    type: 'button',
+    class: 'storage-info',
+    'aria-label': 'About storage backends',
+    title: 'About storage backends',
+  }, 'ⓘ');
+  const storageEl = el('span', { id: 'status-storage', class: 'muted' },
+    el('span', { class: 'storage-key' }, 'Storage:'),
+    storageSelect,
+    storageInfoBtn,
+  );
+
+  // Popover that explains the two backends.
+  const popover       = el('div', { class: 'popover', role: 'dialog', hidden: '' });
+  const popoverTitle  = el('h3', { class: 'popover-title' });
+  const popoverBody   = el('div',  { class: 'popover-body' });
+  const popoverClose  = el('button', { type: 'button', class: 'popover-close', 'aria-label': 'Close' }, '×');
+
+  function renderPopover(crossOriginAvailable) {
+    popoverTitle.textContent = 'Storage backends';
+    popoverBody.replaceChildren(
+      el('p', { class: 'popover-lead' },
+        'Models live in your browser. Pick the backend that matches your setup.'),
+      el('div', { class: 'popover-block' },
+        el('h4', {}, 'Cache API'),
+        el('p', {}, 'Built into every browser. Per-origin, per-quota. Every site that uses the same model downloads its own copy.'),
+        el('p', { class: 'popover-meta ok' }, '✓ Always available.'),
+      ),
+      el('div', { class: 'popover-block' },
+        el('h4', {},
+          'Cross-Origin Storage ',
+          el('span', { class: 'badge-experimental' }, 'experimental'),
+        ),
+        el('p', {}, 'Proposed W3C API. Files are keyed by SHA-256, shared across sites, and verified by the browser on write. Cross-site dedup, larger pooled quota, no per-origin rate limits on Hugging Face.'),
+        crossOriginAvailable
+          ? el('p', { class: 'popover-meta ok' }, '✓ Chrome extension detected — option unlocked.')
+          : el('p', { class: 'popover-meta warn' },
+              'Extension not detected — option is disabled.',
+              el('br'),
+              el('a', {
+                href: 'https://chromewebstore.google.com/detail/cross-origin-storage/denpnpcgjgikjpoglpjefakmdcbmlgih',
+                target: '_blank',
+                rel: 'noopener',
+              }, 'Install Chrome extension →'),
+            ),
+        el('p', { class: 'popover-meta dim' },
+          'Native browser support is in the W3C proposal pipeline. Firefox / Safari adoption depends on each vendor.'),
+      ),
+      el('p', { class: 'popover-foot' },
+        'Switching backends does not migrate existing models — they stay where they were downloaded. New downloads go to the selected backend.'),
+    );
+  }
+
+  function openPopover(crossOriginAvailable) {
+    renderPopover(crossOriginAvailable);
+    popover.replaceChildren(popoverTitle, popoverClose, popoverBody);
+    popover.hidden = false;
+  }
+  function closePopover() {
+    popover.hidden = true;
+  }
+  storageInfoBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    if (popover.hidden) openPopover(currentCrossOriginAvailable);
+    else closePopover();
+  });
+  popoverClose.addEventListener('click', closePopover);
+  document.addEventListener('click', (e) => {
+    if (!popover.hidden && !popover.contains(e.target) && e.target !== storageInfoBtn) {
+      closePopover();
+    }
+  });
+
+  // Track availability so the popover renders the right state without
+  // re-querying navigator every click.
+  let currentCrossOriginAvailable = false;
+
+  const statusBar = el('header', { class: 'status-bar' }, webgpuEl, engineEl, storageEl);
+  statusBar.append(popover);
 
   // ─── Model picker ──────────────────────────────────────────────────────
   const modelSelect = el('select', { id: 'model-select', 'aria-label': 'Choose model' });
   const modelLabel  = el('label', { for: 'model-select' }, 'Model');
   const modelStatus = el('span', { id: 'model-status', class: 'muted' }, '—');
   const downloadBtn = el('button', { type: 'button', id: 'download-btn', class: 'primary' }, 'Download');
-  const deleteBtn   = el('button', { type: 'button', id: 'delete-btn',   class: 'danger' },  'Delete cache');
+  const deleteBtn   = el('button', { type: 'button', id: 'delete-btn',   class: 'danger'  }, 'Delete cache');
 
   const progressTrack = el('div', { class: 'progress-track', hidden: '' });
   const progressFill  = el('div', { class: 'progress-fill' });
@@ -42,17 +126,14 @@ export function mountChat(root, handlers) {
     progressTrack,
   );
 
-  // ─── System prompt ─────────────────────────────────────────────────────
+  // ─── System prompt (with preset dropdown) ──────────────────────────────
   const promptSelect = el('select', { id: 'prompt-select', 'aria-label': 'System prompt preset' });
   const promptLabel  = el('label', { for: 'prompt-select' }, 'Preset');
-
-  const systemLabel = el('label', { for: 'system-prompt' }, 'System prompt');
+  const systemLabel  = el('label', { for: 'system-prompt' }, 'System prompt');
   const systemPrompt = el('textarea', { id: 'system-prompt', rows: '6' });
-
   const systemSection = el('section', { class: 'system-prompt' },
     el('div', { class: 'system-prompt-row' }, promptLabel, promptSelect),
-    systemLabel,
-    systemPrompt,
+    systemLabel, systemPrompt,
   );
 
   // ─── Messages ──────────────────────────────────────────────────────────
@@ -103,13 +184,24 @@ export function mountChat(root, handlers) {
   }
 
   function appendStreamingMessage() {
-    const node = el('div', { class: 'message message-assistant streaming', 'data-role': 'assistant' });
+    const thinking = el('span', { class: 'thinking-dots', 'aria-label': 'Thinking' },
+      el('span'), el('span'), el('span'),
+    );
+    const node = el('div', {
+      class: 'message message-assistant streaming',
+      'data-role': 'assistant',
+    }, thinking);
     messagesEl.append(node);
     scrollToBottom();
     return node;
   }
 
   function appendToMessage(node, chunk) {
+    // First chunk: replace the thinking indicator with actual content.
+    if (!node.dataset.started) {
+      node.dataset.started = 'true';
+      node.replaceChildren();
+    }
     node.textContent += chunk;
     scrollToBottom();
   }
@@ -119,11 +211,11 @@ export function mountChat(root, handlers) {
   }
 
   function setBusy(busy) {
-    sendBtn.disabled     = busy || !engineReady;
-    inputEl.disabled     = busy;
-    cancelBtn.disabled   = !busy;
+    sendBtn.disabled      = busy || !engineReady;
+    inputEl.disabled      = busy;
+    cancelBtn.disabled    = !busy;
     systemPrompt.disabled = busy;
-    resetBtn.disabled    = busy || !engineReady;
+    resetBtn.disabled     = busy || !engineReady;
   }
 
   function showProgress(visible) {
@@ -208,9 +300,14 @@ export function mountChat(root, handlers) {
     handlers.onPromptPreset(promptSelect.value);
   });
 
+  storageSelect.addEventListener('change', () => {
+    if (handlers.onStorageBackendChange) {
+      handlers.onStorageBackendChange(storageSelect.value);
+    }
+  });
+
   // ─── Public controller ─────────────────────────────────────────────────
   return {
-    // Model picker
     setModels(entries) {
       modelSelect.replaceChildren();
       for (const m of entries) {
@@ -219,7 +316,6 @@ export function mountChat(root, handlers) {
       }
     },
 
-    // ─── Prompts ────────────────────────────────────────────────────────
     setPrompts(entries, activeId) {
       promptSelect.replaceChildren();
       for (const p of entries) {
@@ -238,37 +334,63 @@ export function mountChat(root, handlers) {
     },
 
     /**
-     * Replace the textarea with a preset's text. Caller is responsible for
-     * pushing the new prompt to the engine via the regular change handler.
+     * Replace the textarea with a preset's text.
      */
     loadPromptText(text) {
-      systemPrompt.value = text;
+      systemPrompt.value = text ?? '';
     },
 
-    setActiveModel(modelId, modelLabelText) {
+    setActiveModel(modelId) {
       activeModelId = modelId;
       if (modelSelect.value !== modelId) modelSelect.value = modelId;
-      deleteBtn.hidden = false;
     },
 
-    setModelStatus(state, label) {
-      // state: 'available' | 'cached' | 'downloading' | 'error'
+    setModelStatus(label) {
       modelStatus.textContent = label;
-      modelStatus.className =
-        state === 'cached'      ? 'ok'   :
-        state === 'downloading' ? 'warn' :
-        state === 'error'       ? 'bad'  :
-                                   'muted';
+    },
 
-      downloadBtn.disabled = state === 'cached' || state === 'downloading';
-      deleteBtn.disabled   = state !== 'cached';
+    setModelStatusState(state) {
+      // state: 'available' | 'cached' | 'loaded' | 'downloading' | 'error'
+      modelStatus.dataset.state = state;
+      modelStatus.classList.toggle('is-loaded', state === 'loaded');
+
+      // Update the Download button label and styling per state so the user
+      // can tell at a glance whether re-downloading is needed.
+      downloadBtn.classList.remove('btn-primary', 'btn-ghost', 'btn-danger', 'btn-success-static');
+      switch (state) {
+        case 'available':
+          downloadBtn.textContent = 'Download';
+          downloadBtn.classList.add('btn-primary');
+          downloadBtn.disabled = false;
+          break;
+        case 'cached':
+          downloadBtn.textContent = 'Re-download';
+          downloadBtn.classList.add('btn-ghost');
+          downloadBtn.disabled = true;
+          break;
+        case 'loaded':
+          downloadBtn.textContent = '✓ Loaded';
+          downloadBtn.classList.add('btn-success-static');
+          downloadBtn.disabled = true;
+          break;
+        case 'downloading':
+          downloadBtn.textContent = 'Downloading…';
+          downloadBtn.disabled = true;
+          break;
+        case 'error':
+          downloadBtn.textContent = 'Retry download';
+          downloadBtn.classList.add('btn-danger');
+          downloadBtn.disabled = false;
+          break;
+      }
+
+      deleteBtn.disabled = !(state === 'cached' || state === 'loaded');
       modelSelect.disabled = state === 'downloading';
       showProgress(state === 'downloading');
     },
 
     setProgress,
 
-    // Status bar
     setWebGPU(state, label) {
       webgpuEl.textContent = `WebGPU: ${label}`;
       webgpuEl.className = state === 'ok' ? 'ok' : state === 'bad' ? 'bad' : 'warn';
@@ -282,15 +404,47 @@ export function mountChat(root, handlers) {
     },
 
     setStorageBackend(label, isCrossOrigin) {
-      storageEl.textContent = `Storage: ${label}`;
-      storageEl.className = isCrossOrigin ? 'ok' : 'warn';
+      // Kept for backwards compatibility with old callers — just updates the
+      // title attribute on the chip without touching the select.
       storageEl.title = isCrossOrigin
         ? 'Models are stored in Cross-Origin Storage — shared across sites and hash-verified.'
         : 'Models are stored in the per-origin Cache API. Install the Cross-Origin Storage extension to enable cross-site dedup.';
     },
 
-    // Messages — local helpers, hoisted into the mountChat closure so the
-    // submit handler can call `appendMessage(...)` directly.
+    /**
+     * Populate the storage selector with the currently-available backends.
+     * The Cross-Origin Storage option is disabled (and labeled "extension not
+     * installed") when `crossOriginAvailable` is false.
+     * @param {{ crossOriginAvailable: boolean, preferred?: 'cache'|'cross-origin' }} opts
+     */
+    setStorageAvailability({ crossOriginAvailable, preferred = 'cache' }) {
+      currentCrossOriginAvailable = !!crossOriginAvailable;
+      storageSelect.replaceChildren();
+
+      // Cache API — always available.
+      storageSelect.append(el('option', { value: 'cache' }, 'Cache API'));
+
+      // Cross-Origin Storage — disabled without the extension.
+      const crossLabel = crossOriginAvailable
+        ? 'Cross-Origin Storage'
+        : 'Cross-Origin Storage (extension not installed)';
+      const crossOpt = el('option', { value: 'cross-origin' }, crossLabel);
+      if (!crossOriginAvailable) crossOpt.disabled = true;
+      storageSelect.append(crossOpt);
+
+      // Pick the active one. Default to cache; fall back to cache if the
+      // requested preferred backend isn't available.
+      const active = (preferred === 'cross-origin' && crossOriginAvailable) ? 'cross-origin' : 'cache';
+      storageSelect.value = active;
+
+      storageEl.className = crossOriginAvailable ? 'ok' : 'warn';
+      renderPopover(crossOriginAvailable);
+    },
+
+    getStorageBackend() {
+      return storageSelect.value;
+    },
+
     appendMessage,
     appendError,
     appendStreamingMessage,
@@ -310,7 +464,7 @@ export function mountChat(root, handlers) {
 }
 
 /**
- * Tiny element factory. `attrs` may include event handlers via `on*` keys.
+ * Tiny element factory.
  * @param {string} tag
  * @param {Record<string, string|boolean>} [attrs]
  * @param  {...(Node|string)} children

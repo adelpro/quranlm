@@ -83,10 +83,16 @@ async function readCrossOrigin(entry) {
   try {
     const handle = await withTimeout(
       navigator.crossOriginStorage.requestFileHandle(hashFor(entry)),
-      3000,
-      'crossOriginStorage.requestFileHandle() timed out after 3s',
+      8000,
+      'crossOriginStorage.requestFileHandle() timed out after 8s',
     );
     if (!handle) return null;
+    // Some extension builds return a handle whose getFile isn't a function
+    // (or throws synchronously). Guard so we can still fall back to HTTP.
+    if (typeof handle.getFile !== 'function') {
+      console.warn('crossOriginStorage: handle has no getFile(); falling back to HTTP');
+      return null;
+    }
     const file = await handle.getFile();
     return file ?? null;
   } catch (err) {
@@ -220,25 +226,32 @@ export async function deleteCached(modelId) {
  */
 
 /**
- * Download a model into both storage tiers and return a Blob ready for
- * `Engine.create({ model })`.
+ * Download a model into the preferred storage backend and return a Blob ready
+ * for `Engine.create({ model })`. Reads always check both backends (so a model
+ * downloaded with a previous preference still works); writes go to the
+ * currently-selected backend.
  *
  * @param {string} modelId
- * @param {{ onProgress?: (p: ProgressInfo) => void, signal?: AbortSignal }} [opts]
+ * @param {{
+ *   onProgress?: (p: ProgressInfo) => void,
+ *   signal?: AbortSignal,
+ *   preferredStorage?: 'cache' | 'cross-origin' | 'both',
+ * }} [opts]
  * @returns {Promise<Blob>}
  */
 export async function downloadModel(modelId, opts = {}) {
+  const { onProgress, signal, preferredStorage = 'cache' } = opts;
   const entry = MODELS[modelId];
   if (!entry) throw new Error(`Unknown model: ${modelId}`);
 
-  // Already cached? Reuse without touching the network.
+  // Already cached anywhere? Reuse without touching the network.
   const existing = await getCachedBlob(modelId);
   if (existing) {
-    opts.onProgress?.({ downloaded: existing.size, total: existing.size, done: true });
+    onProgress?.({ downloaded: existing.size, total: existing.size, done: true });
     return existing;
   }
 
-  const res = await fetch(entry.url, { signal: opts.signal });
+  const res = await fetch(entry.url, { signal });
   if (!res.ok) {
     throw new Error(
       `HTTP ${res.status} ${res.statusText} — ${entry.url}\n` +
@@ -264,7 +277,7 @@ export async function downloadModel(modelId, opts = {}) {
 
       const now = Date.now();
       if (now - lastEmit > 100) {
-        opts.onProgress?.({ downloaded, total });
+        onProgress?.({ downloaded, total });
         lastEmit = now;
       }
     }
@@ -277,18 +290,21 @@ export async function downloadModel(modelId, opts = {}) {
   chunks.length = 0;
 
   // Verify integrity against the LFS-declared SHA-256 before persisting.
-  // (Cross-Origin Storage will verify on write, but we want to fail loudly
-  // for the Cache API path too.)
   await verifySha256(blob, entry.sha256).catch((err) => {
     throw new Error(`SHA-256 mismatch for ${entry.filename}: ${err.message}`);
   });
 
-  // Persist to both tiers. Cross-Origin Storage writes first so the
-  // globally-shared copy is available even if the local one fails.
-  await writeCrossOrigin(entry, blob);
-  await writeCache(entry, blob);
+  // Persist to the preferred backend. Cross-Origin Storage is always written
+  // first when selected so the globally-shared copy is available even if the
+  // local Cache API write fails.
+  if (preferredStorage === 'cross-origin' || preferredStorage === 'both') {
+    await writeCrossOrigin(entry, blob);
+  }
+  if (preferredStorage === 'cache' || preferredStorage === 'both') {
+    await writeCache(entry, blob);
+  }
 
-  opts.onProgress?.({ downloaded: blob.size, total: blob.size, done: true });
+  onProgress?.({ downloaded: blob.size, total: blob.size, done: true });
   return blob;
 }
 

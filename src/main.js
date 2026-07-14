@@ -12,7 +12,7 @@ import {
   backendLabel,
   isCrossOriginStorageAvailable,
 } from './models.js';
-import { PROMPTS, DEFAULT_PROMPT_ID, listPrompts, getPrompt } from './prompts.js';
+import { DEFAULT_PROMPT_ID, listPrompts, getPrompt } from './prompts.js';
 
 const MAX_NUM_TOKENS = 8192;
 
@@ -27,17 +27,26 @@ const ui = mountChat(appEl, {
   onDownload: (id) => { void downloadSelected(id); },
   onDelete: (id) => { void deleteSelected(id); },
   onPromptPreset: (id) => { void applyPromptPreset(id); },
+  onStorageBackendChange: (id) => { setPreferredStorage(id); },
 });
 
 /** @type {ChatSession | null} */
 let session = null;
 /** @type {string|null} */
 let currentModelId = null;
+/** @type {'cache' | 'cross-origin'} */
+let preferredStorage = 'cache';
 
-// Populate the dropdown immediately so the UI isn't empty while WebGPU is
+function setPreferredStorage(id) {
+  if (id !== 'cache' && id !== 'cross-origin') return;
+  preferredStorage = id;
+  console.log('[litert] storage backend:', id);
+}
+
+// Populate the dropdowns immediately so the UI isn't empty while WebGPU is
 // being probed.
 ui.setModels(Object.values(MODELS));
-ui.setStorageBackend(backendLabel(), isCrossOriginStorageAvailable());
+ui.setStorageAvailability({ crossOriginAvailable: isCrossOriginStorageAvailable() });
 ui.setPrompts(listPrompts(), DEFAULT_PROMPT_ID);
 
 (async function init() {
@@ -52,8 +61,8 @@ ui.setPrompts(listPrompts(), DEFAULT_PROMPT_ID);
       for (const m of Object.values(MODELS)) {
         const cached = await isCached(m.id);
         ui.setActiveModel(m.id);
-        ui.setModelStatus(cached ? 'cached' : 'available',
-          cached ? 'cached (engine disabled)' : 'not downloaded');
+        ui.setModelStatus(cached ? 'cached (engine disabled)' : 'not downloaded');
+        ui.setModelStatusState(cached ? 'cached' : 'available');
       }
       return;
     }
@@ -69,15 +78,13 @@ ui.setPrompts(listPrompts(), DEFAULT_PROMPT_ID);
     for (const m of Object.values(MODELS)) {
       ui.setActiveModel(m.id);
       const cached = await isCached(m.id);
-      ui.setModelStatus(cached ? 'cached' : 'available',
-        cached ? 'cached · click to load' : 'not downloaded');
+      ui.setModelStatus(cached ? 'cached · click to load' : 'not downloaded');
+      ui.setModelStatusState(cached ? 'cached' : 'available');
     }
 
     await selectModel(defaultId);
     console.log('[litert] init: done');
   } catch (err) {
-    // Any uncaught error in the boot sequence ends up here and gets
-    // surfaced in the status bar instead of vanishing into the console.
     console.error('[litert] init failed:', err);
     ui.setEngine('bad', `init failed — ${err?.message ?? err}`);
   }
@@ -102,7 +109,8 @@ async function selectModel(modelId) {
   const cached = await isCached(modelId);
   if (!cached) {
     ui.setEngine('warn', 'pick a model & download');
-    ui.setModelStatus('available', 'not downloaded — click Download');
+    ui.setModelStatusState('available');
+    ui.setModelStatus('not downloaded — click Download');
     return;
   }
 
@@ -114,27 +122,34 @@ async function selectModel(modelId) {
  * then load the engine.
  */
 async function downloadSelected(modelId) {
-  ui.setModelStatus('downloading', 'starting download…');
+  ui.setModelStatusState('downloading');
+  ui.setModelStatus('starting download…');
   ui.setEngine('warn', 'downloading model…');
 
   try {
     const blob = await downloadModel(modelId, {
       onProgress: ({ downloaded, total }) => {
         ui.setProgress(downloaded, total);
-        ui.setModelStatus('downloading',
-          total ? `${formatBytes(downloaded)} / ${formatBytes(total)}` : `${formatBytes(downloaded)}`);
+        ui.setModelStatus(
+          total
+            ? `${formatBytes(downloaded)} / ${formatBytes(total)}`
+            : `${formatBytes(downloaded)}`,
+        );
       },
+      preferredStorage,
     });
 
     ui.setProgress(blob.size, blob.size);
-    ui.setModelStatus('cached', `cached · ${formatBytes(blob.size)}`);
+    ui.setModelStatus(`cached · ${formatBytes(blob.size)}`);
+    ui.setModelStatusState('cached');
 
     // Pass the blob straight to the engine — don't re-fetch from storage,
     // since the Cross-Origin Storage write may have silently failed.
     await loadEngineFor(modelId, blob);
   } catch (err) {
     console.error('download failed:', err);
-    ui.setModelStatus('error', err?.message ?? String(err));
+    ui.setModelStatusState('error');
+    ui.setModelStatus(err?.message ?? String(err));
     ui.setEngine('bad', `download error — ${err?.message ?? err}`);
   }
 }
@@ -148,32 +163,59 @@ async function deleteSelected(modelId) {
     ui.clearMessages();
     ui.setEngine('warn', 'cache cleared — pick another model');
   }
-  ui.setModelStatus('available', 'not downloaded');
+  ui.setModelStatusState('available');
+  ui.setModelStatus('not downloaded');
 }
 
 /**
  * Load the LiteRT Engine for the given (cached) model.
  * If `blobOverride` is supplied (e.g. just-downloaded bytes), use that
- * directly instead of re-fetching from storage — avoids a round-trip
- * through Cross-Origin Storage that may have failed silently on write.
+ * directly instead of re-fetching from storage.
  */
 async function loadEngineFor(modelId, blobOverride = null) {
   const source = blobOverride ?? await getCachedBlob(modelId);
   if (!source) {
-    ui.setModelStatus('available', 'not downloaded');
+    ui.setModelStatusState('available');
+    ui.setModelStatus('not downloaded');
     return;
   }
 
-  ui.setEngine('warn', `loading ${MODELS[modelId].label}…`);
+  // The first-time engine init can take several seconds (model parse, shader
+  // compile, accelerator registration). Tick the elapsed time so the user
+  // sees the page isn't frozen.
+  const t0 = performance.now();
+  const label = MODELS[modelId].label;
+  ui.setEngine('warn', `warming up ${label}…`);
+  ui.setActiveModel(modelId);
+  ui.setModelStatusState('cached');
+  ui.setModelStatus(`loading · ${label}…`);
+
+  const tick = setInterval(() => {
+    const s = ((performance.now() - t0) / 1000).toFixed(1);
+    ui.setEngine('warn', `warming up ${label}… (${s}s)`);
+    ui.setModelStatus(`loading · ${label}… (${s}s)`);
+  }, 250);
+
   try {
     const engine = await loadEngine({ modelUrl: source, maxNumTokens: MAX_NUM_TOKENS });
     session = new ChatSession(engine);
     currentModelId = modelId;
+
+    ui.setEngine('warn', 'injecting system prompt…');
+    ui.setModelStatus(`loading · ${label}… injecting prompt`);
     await session.setSystemPrompt(ui.getSystemPrompt());
-    ui.setEngine('ok', `ready · ${MODELS[modelId].label}`);
+
+    clearInterval(tick);
+    const total = ((performance.now() - t0) / 1000).toFixed(1);
+    ui.setEngine('ok', `ready · ${label} · ${total}s`);
+    ui.setModelStatusState('loaded');
+    ui.setModelStatus(`${label} · loaded in ${total}s`);
   } catch (err) {
+    clearInterval(tick);
     console.error('engine init failed:', err);
     ui.setEngine('bad', `error — ${err?.message ?? err}`);
+    ui.setModelStatusState('error');
+    ui.setModelStatus(err?.message ?? 'engine init failed');
     session = null;
   }
 }
@@ -191,7 +233,6 @@ async function applySystemPrompt(text) {
 async function applyPromptPreset(presetId) {
   const preset = getPrompt(presetId);
   if (!preset) return;
-  // Replace the textarea content and push to the engine.
   ui.loadPromptText(preset.text);
   await applySystemPrompt(preset.text);
 }
@@ -209,14 +250,24 @@ async function resetConversation() {
 
 async function sendMessage(text) {
   if (!session) { ui.setBusy(false); return; }
+
   const assistantEl = ui.appendStreamingMessage();
+  const t0 = performance.now();
+  ui.setEngine('warn', 'thinking…');
   try {
     for await (const chunk of session.sendStream(text)) {
+      if (assistantEl.dataset.started !== 'true') {
+        const firstToken = ((performance.now() - t0) / 1000).toFixed(1);
+        ui.setEngine('ok', `decoding · first token ${firstToken}s`);
+      }
       ui.appendToMessage(assistantEl, chunk);
     }
+    const total = ((performance.now() - t0) / 1000).toFixed(1);
+    ui.setEngine('ok', `ready · ${MODELS[currentModelId ?? '']?.label ?? ''} · replied in ${total}s`);
   } catch (err) {
     console.error('sendStream failed:', err);
     ui.appendError(`Generation error: ${err?.message ?? err}`);
+    ui.setEngine('bad', `error — ${err?.message ?? err}`);
   } finally {
     ui.finishStreaming(assistantEl);
     ui.setBusy(false);
