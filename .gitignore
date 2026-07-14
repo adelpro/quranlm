@@ -5,3 +5,4 @@ public/models/
 *.litertlm
 .DS_Store
 *.log
+.yarn/cache
