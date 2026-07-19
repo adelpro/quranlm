@@ -1,6 +1,8 @@
 // Modern, minimalist UI for the chat application
 // No framework. Returns a controller object the caller uses to push updates.
 
+import { formatBytes, formatEta } from './utils/format.js';
+
 /**
  * Mount the UI inside `root` and wire user actions to `handlers`.
  *
@@ -15,8 +17,7 @@
  *   onDelete: (modelId: string) => void,
  *   onPromptPreset: (presetId: string) => void,
  *   onStorageBackendChange: (id: string) => void,
- *   onExtract?: (req: { schemaId: string, schema: object | null, text: string }) => void,
- *   onExtractCancel?: () => void,
+ *   onOutputFormatChange?: (text: string) => void,
  * }} handlers
  */
 export function mountChat(root, handlers) {
@@ -192,90 +193,31 @@ export function mountChat(root, handlers) {
   let activeModelId = null;
   let settingsOpen = false;
 
-  // ─── Extract section (built lazily, inserted into settingsPanel below) ─
-  // The custom-schema textarea is hidden unless the user selects the
-  // `custom` schema, at which point `showCustomSchema(true)` is called.
-  const extractHeader = el('div', { class: 'settings-section-header' }, 'Structured extract');
-
-  const extractSchemaSelect = el('select', { id: 'extract-schema', class: 'extract-schema-select' });
-  /** @type {Array<{id: string, label: string, description?: string, schema: object|null, placeholder?: string}>} */
-  let schemaEntries = [];
-  let activeSchemaId = '';
-  /** @type {string|null} */
-  let customSchemaJson = null;
-  function refreshCustomSchemaVisibility() {
-    customSchemaRow.hidden = activeSchemaId !== 'custom';
-  }
-  const extractSchemaRow = el('div', { class: 'settings-row' },
-    el('label', { for: 'extract-schema' }, 'Schema'),
-    extractSchemaSelect,
-  );
-
-  const extractInputTextarea = el('textarea', {
-    id: 'extract-input',
-    class: 'system-prompt-input',
-    rows: '4',
-    placeholder: 'Paste the text to extract structured data from…',
+  // ─── Output format section ─────────────────────────────────────────────
+  // A single editable JSON-Schema textarea. When non-empty + valid, the next
+  // chat reply is constrained to that shape (via LiteRT-LM's
+  // enableConstrainedDecoding). When empty / invalid, chat reverts to
+  // free-form prose.
+  const outputFormatHeader = el('div', { class: 'settings-section-header' }, 'Output format');
+  const outputFormatTextarea = el('textarea', {
+    id: 'output-format',
+    class: 'system-prompt-input output-format-input',
+    rows: '10',
+    spellcheck: 'false',
   });
-  const extractInputRow = el('div', { class: 'settings-row settings-row--prompt' },
-    el('label', { for: 'extract-input' }, 'Input'),
-    extractInputTextarea,
+  const outputFormatStatus = el('span', { class: 'model-status-text', id: 'output-format-status' });
+  const outputFormatRow = el('div', { class: 'settings-row settings-row--prompt' },
+    el('label', { for: 'output-format' }, 'JSON'),
+    outputFormatTextarea,
   );
+  const outputFormatFooter = el('div', { class: 'model-actions' }, outputFormatStatus);
 
-  const customSchemaTextarea = el('textarea', {
-    id: 'extract-custom-schema',
-    class: 'system-prompt-input extract-schema-input',
-    rows: '5',
-    placeholder: '{"type":"object","properties":{…},"required":[…]}',
-  });
-  const customSchemaRow = el('div', { class: 'settings-row settings-row--prompt', hidden: '' },
-    el('label', { for: 'extract-custom-schema' }, 'Schema JSON'),
-    customSchemaTextarea,
-  );
-
-  const extractBtn = el('button', {
-    type: 'button',
-    class: 'btn btn-primary btn-sm',
-    id: 'extract-btn',
-  }, 'Extract');
-  const extractCancelBtn = el('button', {
-    type: 'button',
-    class: 'btn btn-ghost btn-sm',
-    id: 'extract-cancel-btn',
-    disabled: '',
-  }, 'Cancel');
-  const extractStatus = el('span', { class: 'model-status-text' });
-  const extractActionsRow = el('div', { class: 'model-actions' },
-    extractStatus,
-    extractCancelBtn,
-    extractBtn,
-  );
-
-  const extractOutputPre = el('pre', {
-    id: 'extract-output',
-    class: 'extract-output',
-    'aria-live': 'polite',
-  }, '');
-  const extractCopyBtn = el('button', {
-    type: 'button',
-    class: 'btn btn-sm btn-ghost extract-copy-btn',
-  }, 'Copy');
-  const extractOutputWrap = el('div', { class: 'extract-output-wrap' },
-    extractOutputPre,
-    extractCopyBtn,
-  );
-
-  // Insert Extract section into settingsPanel, just before the
-  // progress container, after modelActions.
-  const extractDivider = el('hr', { class: 'settings-divider' });
+  const outputFormatDivider = el('hr', { class: 'settings-divider' });
   settingsPanel.append(
-    extractDivider,
-    extractHeader,
-    extractSchemaRow,
-    extractInputRow,
-    customSchemaRow,
-    extractActionsRow,
-    extractOutputWrap,
+    outputFormatDivider,
+    outputFormatHeader,
+    outputFormatRow,
+    outputFormatFooter,
   );
 
   // ─── Step management ───────────────────────────────────────────────────
@@ -487,7 +429,7 @@ export function mountChat(root, handlers) {
     }
   }
 
-  function setProgress(downloaded, total) {
+  function setProgress(downloaded, total, etaSeconds) {
     if (!total || total <= 0) {
       progressFill.style.width = '100%';
       progressInfo.textContent = formatBytes(downloaded);
@@ -495,13 +437,9 @@ export function mountChat(root, handlers) {
     }
     const pct = Math.min(100, (downloaded / total) * 100);
     progressFill.style.width = `${pct}%`;
-    progressInfo.textContent = `${pct.toFixed(0)}% · ${formatBytes(downloaded)} / ${formatBytes(total)}`;
-  }
-
-  function formatBytes(n) {
-    if (!Number.isFinite(n)) return '?';
-    const mb = n / 1024 / 1024;
-    return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${mb.toFixed(0)} MB`;
+    const eta = formatEta(etaSeconds);
+    const base = `${pct.toFixed(0)}% · ${formatBytes(downloaded)} / ${formatBytes(total)}`;
+    progressInfo.textContent = eta ? `${base} · ${eta}` : base;
   }
 
   // ─── Events ────────────────────────────────────────────────────────────
@@ -571,64 +509,13 @@ export function mountChat(root, handlers) {
     }
   });
 
-  // ─── Extract event handlers ────────────────────────────────────────────
-  extractSchemaSelect.addEventListener('change', () => {
-    activeSchemaId = extractSchemaSelect.value;
-    const entry = schemaEntries.find((s) => s.id === activeSchemaId);
-    if (entry?.placeholder) {
-      extractInputTextarea.placeholder = entry.placeholder;
-    }
-    refreshCustomSchemaVisibility();
-  });
-
-  customSchemaTextarea.addEventListener('input', () => {
-    customSchemaJson = customSchemaTextarea.value;
-  });
-
-  extractBtn.addEventListener('click', () => {
-    if (extractBtn.disabled) return;
-    const schemaEntry = schemaEntries.find((s) => s.id === activeSchemaId);
-    if (!schemaEntry) {
-      setExtractResult('No schema selected.', { error: true });
-      return;
-    }
-    const text = extractInputTextarea.value.trim();
-    if (!text) {
-      setExtractResult('Input is empty.', { error: true });
-      return;
-    }
-    let schema = schemaEntry.schema;
-    if (activeSchemaId === 'custom') {
-      const raw = customSchemaTextarea.value.trim();
-      if (!raw) {
-        setExtractResult('Custom schema is empty.', { error: true });
-        return;
-      }
-      try {
-        schema = JSON.parse(raw);
-      } catch (err) {
-        setExtractResult(`Custom schema is not valid JSON: ${err.message}`, { error: true });
-        return;
-      }
-    }
-    handlers.onExtract?.({ schemaId: activeSchemaId, schema, text });
-  });
-
-  extractCancelBtn.addEventListener('click', () => {
-    handlers.onExtractCancel?.();
-  });
-
-  extractCopyBtn.addEventListener('click', async () => {
-    const text = extractOutputPre.textContent ?? '';
-    if (!text.trim()) return;
-    try {
-      await navigator.clipboard.writeText(text);
-      const original = extractCopyBtn.textContent;
-      extractCopyBtn.textContent = 'Copied ✓';
-      setTimeout(() => { extractCopyBtn.textContent = original; }, 1200);
-    } catch (err) {
-      console.warn('clipboard copy failed:', err);
-    }
+  // ─── Output format event handler ───────────────────────────────────────
+  let outputFormatDebounce = null;
+  outputFormatTextarea.addEventListener('input', () => {
+    clearTimeout(outputFormatDebounce);
+    outputFormatDebounce = setTimeout(() => {
+      handlers.onOutputFormatChange?.(outputFormatTextarea.value);
+    }, 350);
   });
 
   // ─── Public controller ─────────────────────────────────────────────────
@@ -830,47 +717,24 @@ export function mountChat(root, handlers) {
       messagesEl.replaceChildren();
     },
 
-    // ─── Extract controller methods ──────────────────────────────────────
-    setSchemas(entries, activeId) {
-      schemaEntries = entries ?? [];
-      activeSchemaId = activeId || (schemaEntries[0]?.id ?? '');
-      extractSchemaSelect.replaceChildren();
-      for (const entry of schemaEntries) {
-        extractSchemaSelect.append(el('option', { value: entry.id }, entry.label));
-      }
-      if (activeSchemaId) extractSchemaSelect.value = activeSchemaId;
-      const entry = schemaEntries.find((s) => s.id === activeSchemaId);
-      if (entry?.placeholder) {
-        extractInputTextarea.placeholder = entry.placeholder;
-      }
-      refreshCustomSchemaVisibility();
+    // ─── Output format controller methods ────────────────────────────────
+    setOutputFormat(text) {
+      // Don't fire the change handler during programmatic assignment.
+      clearTimeout(outputFormatDebounce);
+      outputFormatTextarea.value = text ?? '';
+    },
+
+    getOutputFormat() {
+      return outputFormatTextarea.value;
     },
 
     /**
-     * Show a result in the Extract output area. Pass null to clear it.
-     * @param {string | null} text
-     * @param {{ error?: boolean }} [opts]
+     * Show the validation/apply status of the output-format JSON.
+     * @param {{ state: 'on' | 'off' | 'invalid', message?: string }} status
      */
-    setExtractResult(text, opts = {}) {
-      extractOutputPre.textContent = text ?? '';
-      extractOutputPre.dataset.error = opts.error ? 'true' : '';
-      extractCopyBtn.disabled = !text?.trim();
-    },
-
-    /**
-     * Toggle the Extract UI between idle and busy states. While busy, the
-     * Extract button is replaced visually by "Extracting…" and the cancel
-     * button is enabled.
-     * @param {boolean} busy
-     */
-    setExtractBusy(busy) {
-      extractBtn.disabled = !!busy;
-      extractBtn.textContent = busy ? 'Extracting…' : 'Extract';
-      extractCancelBtn.disabled = !busy;
-      extractSchemaSelect.disabled = !!busy;
-      extractInputTextarea.disabled = !!busy;
-      customSchemaTextarea.disabled = !!busy;
-      extractStatus.textContent = busy ? 'running…' : '';
+    setOutputFormatStatus({ state, message }) {
+      outputFormatStatus.dataset.state = state;
+      outputFormatStatus.textContent = message ?? '';
     },
   };
 }

@@ -5,9 +5,10 @@ import {
   checkWebGPUSupport,
   loadEngine,
   ChatSession,
-  ExtractorSession,
+  assertValidLiteRtSchema,
 } from './chat.js';
 import { mountChat } from './ui.js';
+import { formatBytes } from './utils/format.js';
 import {
   MODELS,
   isCached,
@@ -19,7 +20,7 @@ import {
   isCrossOriginStorageAvailable,
 } from './models.js';
 import { DEFAULT_PROMPT_ID, listPrompts, getPrompt } from './prompts.js';
-import { DEFAULT_SCHEMA_ID, listSchemas } from './schemas.js';
+import { DEFAULT_OUTPUT_FORMAT } from './output-format.js';
 
 const MAX_NUM_TOKENS = 8192;
 const STORAGE_KEY = 'litert-storage-backend';
@@ -65,16 +66,15 @@ const ui = mountChat(appEl, {
   onDelete: (id) => { void deleteSelected(id); },
   onPromptPreset: (id) => { void applyPromptPreset(id); },
   onStorageBackendChange: (id) => { setPreferredStorage(id); },
-  onExtract: (req) => { void runExtract(req); },
-  onExtractCancel: () => { extractor?.cancel(); },
+  onOutputFormatChange: (text) => { void applyOutputFormat(text); },
 });
 
 /** @type {ChatSession | null} */
 let session = null;
 /** @type {string|null} */
 let currentModelId = null;
-/** @type {ExtractorSession | null} */
-let extractor = null;
+/** @type {object | null} */
+let outputSchema = null;
 
 function setPreferredStorage(id) {
   if (id !== 'cache' && id !== 'cross-origin') return;
@@ -90,7 +90,10 @@ ui.setStorageAvailability({
   preferred: preferredStorage
 });
 ui.setPrompts(listPrompts(), DEFAULT_PROMPT_ID);
-ui.setSchemas(listSchemas(), DEFAULT_SCHEMA_ID);
+ui.setOutputFormat(DEFAULT_OUTPUT_FORMAT);
+// Seed the parser + apply handler so the initial schema is honored without
+// waiting for the user to type.
+void applyOutputFormat(DEFAULT_OUTPUT_FORMAT);
 
 // ─── Init ──────────────────────────────────────────────────────────────────
 (async function init() {
@@ -220,11 +223,7 @@ ui.setSchemas(listSchemas(), DEFAULT_SCHEMA_ID);
 async function selectModel(modelId) {
   if (!MODELS[modelId]) return;
 
-  // Tear down any existing engine + extractor before swapping.
-  if (extractor) {
-    await extractor.dispose();
-    extractor = null;
-  }
+  // Tear down any existing engine before swapping.
   if (session) {
     await session.dispose();
     session = null;
@@ -264,18 +263,35 @@ async function selectModel(modelId) {
 
 async function downloadSelected(modelId) {
   ui.setModelStatusState('downloading');
-  ui.setModelStatus('starting download…');
+  ui.setModelStatus('downloading…');
   ui.setEngine('warn', 'Downloading model…');
+
+  // Speed tracking state for ETA. EMA smooths the noisy per-chunk instantaneous
+  // bytes/sec, so the displayed ETA doesn't jitter on every tick.
+  let lastTs = performance.now();
+  let lastBytes = 0;
+  let avgBytesPerSec = null; // null until we have at least one full interval
+  const EMA_ALPHA = 0.3;
 
   try {
     const blob = await downloadModel(modelId, {
       onProgress: ({ downloaded, total }) => {
-        ui.setProgress(downloaded, total);
-        ui.setModelStatus(
-          total
-            ? `${formatBytes(downloaded)} / ${formatBytes(total)}`
-            : `${formatBytes(downloaded)}`,
-        );
+        const now = performance.now();
+        const dtMs = now - lastTs;
+        if (dtMs > 0 && downloaded > lastBytes) {
+          const instantBps = ((downloaded - lastBytes) / dtMs) * 1000;
+          avgBytesPerSec = avgBytesPerSec == null
+            ? instantBps
+            : EMA_ALPHA * instantBps + (1 - EMA_ALPHA) * avgBytesPerSec;
+        }
+        lastTs = now;
+        lastBytes = downloaded;
+
+        const etaSeconds = total && avgBytesPerSec
+          ? Math.max(0, (total - downloaded) / avgBytesPerSec)
+          : null;
+
+        ui.setProgress(downloaded, total, etaSeconds);
       },
       preferredStorage,
     });
@@ -300,15 +316,10 @@ async function downloadSelected(modelId) {
 async function deleteSelected(modelId) {
   await deleteCached(modelId);
   if (session && currentModelId === modelId) {
-    if (extractor) {
-      await extractor.dispose();
-      extractor = null;
-    }
     await session.dispose();
     session = null;
     currentModelId = null;
     ui.clearMessages();
-    ui.setExtractResult(null);
     ui.setEngine('warn', 'Cache cleared — pick another model');
   }
   ui.setModelStatusState('available');
@@ -366,7 +377,10 @@ async function loadEngineFor(modelId, blobOverride = null) {
     ui.updateStep('loading', 'active', 'Setting up system prompt...');
     ui.setEngine('warn', 'Setting up system prompt…');
     ui.setModelStatus(`loading · ${label}… setting up`);
-    await session.setSystemPrompt(ui.getSystemPrompt());
+    await session.setConfig({
+      systemPrompt: ui.getSystemPrompt(),
+      outputSchema,
+    });
 
     clearInterval(tick);
     const total = ((performance.now() - t0) / 1000).toFixed(1);
@@ -385,48 +399,58 @@ async function loadEngineFor(modelId, blobOverride = null) {
   }
 }
 
-// ─── Structured extraction (constrained decoding) ─────────────────────────
+// ─── Output format (constrained decoding) ─────────────────────────────────
 
 /**
- * Build/refresh the extractor. It shares the same `Engine` instance as the
- * chat `session` — both Conversation objects derive from the same engine, so
- * we don't load the model twice. If the engine hasn't loaded yet, return null.
+ * Re-parse the Output Format textarea and apply the resulting JSON-Schema
+ * to the current chat session. Empty / invalid input disables constrained
+ * decoding (chat reverts to free-form). Updates the status indicator.
  */
-async function ensureExtractor() {
-  if (extractor) return extractor;
-  if (!session) return null;
-  extractor = new ExtractorSession(session.engine);
-  return extractor;
-}
-
-async function runExtract({ schemaId, schema, text }) {
-  const ex = await ensureExtractor();
-  if (!ex) {
-    ui.setExtractResult('Engine not ready — load a model first.', { error: true });
+async function applyOutputFormat(text) {
+  const raw = (text ?? '').trim();
+  if (!raw) {
+    outputSchema = null;
+    ui.setOutputFormatStatus({ state: 'off', message: 'Free-form' });
+    if (session) {
+      try { await session.setConfig({ outputSchema: null }); }
+      catch (err) { console.warn('clear schema failed:', err); }
+    }
     return;
   }
-  ui.setExtractBusy(true);
-  ui.setExtractResult(null);
+
+  let parsed;
   try {
-    try {
-      await ex.setSchema({ name: schemaId, schema });
-    } catch (schemaErr) {
-      ui.setExtractResult(`Schema rejected: ${schemaErr.message}`, { error: true });
-      console.warn('[extract] schema validation failed:', schemaErr);
-      return;
-    }
-    const res = await ex.extract(text);
-    if (res.ok) {
-      ui.setExtractResult(JSON.stringify(res.data, null, 2));
-    } else {
-      ui.setExtractResult(res.error, { error: true });
-      console.warn('[extract] failed:', res.error);
-    }
+    parsed = JSON.parse(raw);
   } catch (err) {
-    console.error('[extract] unexpected error:', err);
-    ui.setExtractResult(err?.message ?? String(err), { error: true });
-  } finally {
-    ui.setExtractBusy(false);
+    outputSchema = null;
+    ui.setOutputFormatStatus({ state: 'invalid', message: `Invalid JSON: ${err.message}` });
+    if (session) {
+      try { await session.setConfig({ outputSchema: null }); }
+      catch (err) { console.warn('clear schema failed:', err); }
+    }
+    return;
+  }
+
+  try {
+    assertValidLiteRtSchema(parsed);
+  } catch (err) {
+    outputSchema = null;
+    ui.setOutputFormatStatus({ state: 'invalid', message: `Schema rejected: ${err.message}` });
+    if (session) {
+      try { await session.setConfig({ outputSchema: null }); }
+      catch (err) { console.warn('clear schema failed:', err); }
+    }
+    return;
+  }
+
+  outputSchema = parsed;
+  ui.setOutputFormatStatus({ state: 'on', message: 'Structured output: ON' });
+  if (session) {
+    try { await session.setConfig({ outputSchema: parsed }); }
+    catch (err) {
+      console.warn('apply schema failed:', err);
+      ui.setOutputFormatStatus({ state: 'invalid', message: `Apply failed: ${err.message}` });
+    }
   }
 }
 
@@ -435,9 +459,9 @@ async function runExtract({ schemaId, schema, text }) {
 async function applySystemPrompt(text) {
   if (!session) return;
   try {
-    await session.setSystemPrompt(text);
+    await session.setConfig({ systemPrompt: text });
   } catch (err) {
-    console.error('setSystemPrompt failed:', err);
+    console.error('setConfig failed:', err);
     ui.appendError(`System prompt change failed: ${err?.message ?? err}`);
   }
 }
@@ -452,7 +476,7 @@ async function applyPromptPreset(presetId) {
 async function resetConversation() {
   if (!session) return;
   try {
-    await session.setSystemPrompt(ui.getSystemPrompt());
+    await session.setConfig({ systemPrompt: ui.getSystemPrompt() });
     ui.clearMessages();
   } catch (err) {
     console.error('reset failed:', err);
@@ -489,11 +513,3 @@ async function sendMessage(text) {
 // ─── Cleanup ──────────────────────────────────────────────────────────────
 
 window.addEventListener('pagehide', () => { session?.dispose(); });
-
-// ─── Helpers ──────────────────────────────────────────────────────────────
-
-function formatBytes(n) {
-  if (!Number.isFinite(n)) return '? MB';
-  const mb = n / 1024 / 1024;
-  return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(0)} MB`;
-}

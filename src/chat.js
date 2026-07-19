@@ -63,7 +63,10 @@ export async function loadEngine({ modelUrl, maxNumTokens = DEFAULT_MAX_TOKENS }
 
 /**
  * Stateful chat session: owns one Engine + one Conversation.
- * Re-applying the system prompt creates a new Conversation (history resets).
+ * Re-applying the config (system prompt and/or output schema) creates a
+ * new Conversation (history resets). Pass `outputSchema: null` to chat in
+ * free-form mode; pass a JSON-Schema object to constrain every reply to
+ * that shape via a single function tool + `enableConstrainedDecoding`.
  */
 export class ChatSession {
   /** @param {import('@litert-lm/core').Engine} engine */
@@ -71,24 +74,67 @@ export class ChatSession {
     this.engine = engine;
     /** @type {import('@litert-lm/core').Conversation | null} */
     this.conversation = null;
+    /** @type {string} */
     this.systemPrompt = '';
+    /** @type {object | null} */
+    this.outputSchema = null;
   }
 
   /**
-   * Apply (or re-apply) a system prompt. Creates a new Conversation.
+   * Apply (or re-apply) the conversation config. Creates a new Conversation.
+   *
+   * @param {{
+   *   systemPrompt?: string,
+   *   outputSchema?: object | null,
+   * }} opts
+   */
+  async setConfig({ systemPrompt, outputSchema = null } = {}) {
+    if (systemPrompt !== undefined) {
+      this.systemPrompt = (systemPrompt ?? '').trim();
+    }
+    this.outputSchema = outputSchema;
+    if (outputSchema) {
+      assertValidLiteRtSchema(outputSchema);
+    }
+
+    /** @type {import('@litert-lm/core').ConversationConfig} */
+    const config = {
+      preface: {
+        messages: [{ role: 'system', content: this.systemPrompt }],
+      },
+    };
+    if (outputSchema) {
+      config.preface.tools = [{
+        type: 'function',
+        function: {
+          name: 'respond',
+          description: 'Respond with structured JSON matching the schema.',
+          parameters: outputSchema,
+        },
+      }];
+      config.enableConstrainedDecoding = true;
+    }
+    this.conversation = await this.engine.createConversation(config);
+  }
+
+  /**
+   * Back-compat shim — old callers used `setSystemPrompt(prompt)`. Redirects
+   * to `setConfig` with no schema.
    * @param {string} prompt
    */
   async setSystemPrompt(prompt) {
-    const content = (prompt ?? '').trim();
-    this.systemPrompt = content;
-    this.conversation = await this.engine.createConversation({
-      preface: { messages: [{ role: 'system', content }] },
-    });
+    return this.setConfig({ systemPrompt: prompt, outputSchema: this.outputSchema });
   }
 
   /**
    * Stream assistant text for a user message. Yields text fragments.
    * `cancel()` on this session interrupts the stream.
+   *
+   * Two modes:
+   * - Free-form (no schema): streaming via `sendMessageStreaming`.
+   * - Constrained (outputSchema set): non-streaming via `sendMessage`; if
+   *   the model emits a tool call, yields the pretty-printed JSON of its
+   *   arguments; otherwise falls back to any `reply.content` text.
    *
    * Note: `sendMessageStreaming` returns a ReadableStream<Message>, where
    * `Message.content` may be a plain string or an array of ContentPart.
@@ -98,7 +144,29 @@ export class ChatSession {
    */
   async *sendStream(userText) {
     if (!this.conversation) {
-      throw new Error('ChatSession has no conversation. Call setSystemPrompt() first.');
+      throw new Error('ChatSession has no conversation. Call setConfig() first.');
+    }
+
+    if (this.outputSchema) {
+      // Constrained mode: single non-streaming call, then yield the result.
+      const reply = await this.conversation.sendMessage(userText);
+      const call = reply?.tool_calls?.[0];
+      const args = call?.function?.arguments;
+      if (args != null) {
+        const pretty = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
+        if (pretty) yield pretty;
+        return;
+      }
+      const content = reply?.content;
+      if (typeof content === 'string' && content) yield content;
+      else if (Array.isArray(content)) {
+        for (const item of content) {
+          if (item?.type === 'text' && typeof item.text === 'string' && item.text) {
+            yield item.text;
+          }
+        }
+      }
+      return;
     }
 
     const stream = this.conversation.sendMessageStreaming(userText);
@@ -179,12 +247,24 @@ export function assertValidLiteRtSchema(schema) {
     throw new Error('Schema must be a JSON object.');
   }
   const s = /** @type {{ type?: string, properties?: object, required?: unknown, items?: unknown }} */ (schema);
-  if (s.type !== undefined && !LITER_T_SCHEMA_TYPES.has(s.type)) {
+  // LiteRT-LM's constrained decoder (gemma_model_constraint_provider) only
+  // accepts schemas rooted at `type: "object"`. Reject anything else up-front
+  // so the user sees a clear message at edit-time instead of a
+  // `Failed to create constraint with tools` decode-time crash.
+  if (s.type === undefined) {
+    throw new Error('Schema must declare root "type" (LiteRT-LM requires type: "object").');
+  }
+  if (!LITER_T_SCHEMA_TYPES.has(s.type)) {
     throw new Error(
       `Unsupported schema type "${s.type}". LiteRT-LM supports: ${[...LITER_T_SCHEMA_TYPES].join(', ')}.`
     );
   }
-  if (s.type === 'object' && s.properties && typeof s.properties !== 'object') {
+  if (s.type !== 'object') {
+    throw new Error(
+      `LiteRT-LM constrained decoding requires root "type": "object" (got "${s.type}").`
+    );
+  }
+  if (s.properties && (typeof s.properties !== 'object' || Array.isArray(s.properties))) {
     throw new Error('"properties" must be an object.');
   }
   if (s.required !== undefined && !Array.isArray(s.required)) {
