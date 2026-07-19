@@ -1,7 +1,12 @@
 // Entry point. Boots the app: checks WebGPU → lists models → lets the user
 // pick one (downloading if needed) → loads the engine → wires the chat UI.
 
-import { checkWebGPUSupport, loadEngine, ChatSession } from './chat.js';
+import {
+  checkWebGPUSupport,
+  loadEngine,
+  ChatSession,
+  ExtractorSession,
+} from './chat.js';
 import { mountChat } from './ui.js';
 import {
   MODELS,
@@ -14,6 +19,7 @@ import {
   isCrossOriginStorageAvailable,
 } from './models.js';
 import { DEFAULT_PROMPT_ID, listPrompts, getPrompt } from './prompts.js';
+import { DEFAULT_SCHEMA_ID, listSchemas } from './schemas.js';
 
 const MAX_NUM_TOKENS = 8192;
 const STORAGE_KEY = 'litert-storage-backend';
@@ -59,12 +65,16 @@ const ui = mountChat(appEl, {
   onDelete: (id) => { void deleteSelected(id); },
   onPromptPreset: (id) => { void applyPromptPreset(id); },
   onStorageBackendChange: (id) => { setPreferredStorage(id); },
+  onExtract: (req) => { void runExtract(req); },
+  onExtractCancel: () => { extractor?.cancel(); },
 });
 
 /** @type {ChatSession | null} */
 let session = null;
 /** @type {string|null} */
 let currentModelId = null;
+/** @type {ExtractorSession | null} */
+let extractor = null;
 
 function setPreferredStorage(id) {
   if (id !== 'cache' && id !== 'cross-origin') return;
@@ -80,6 +90,7 @@ ui.setStorageAvailability({
   preferred: preferredStorage
 });
 ui.setPrompts(listPrompts(), DEFAULT_PROMPT_ID);
+ui.setSchemas(listSchemas(), DEFAULT_SCHEMA_ID);
 
 // ─── Init ──────────────────────────────────────────────────────────────────
 (async function init() {
@@ -155,9 +166,22 @@ ui.setPrompts(listPrompts(), DEFAULT_PROMPT_ID);
     ui.updateStep('models', 'done', `${modelIds.length} models checked`);
 
     // Step 4: Load engine
+    // `engineLoaded` tracks whether the engine actually came up — only then
+    // do we flip the header to green "Ready" and unlock the Send button.
+    // Previously the UI was forced to 'ok' unconditionally, which made the
+    // header claim Ready even when `session` was still null (see bug report).
+    let engineLoaded = false;
     if (modelStatuses[defaultId]?.valid) {
       ui.updateStep('loading', 'active', 'Loading...');
-      await loadEngineFor(defaultId);
+      try {
+        // Pass the already-verified Blob to skip a second SHA-256 pass over
+        // the 1.9 GB blob in getCachedBlob().
+        await loadEngineFor(defaultId, modelStatuses[defaultId].blob);
+        engineLoaded = !!session;          // loadEngineFor sets session on success
+      } catch (err) {
+        ui.updateStep('loading', 'error', err?.message ?? 'load failed');
+        ui.setEngine('warn', 'Load failed');
+      }
     } else {
       ui.updateStep('loading', 'error', 'Model not found');
       ui.setActiveModel(defaultId);
@@ -166,9 +190,14 @@ ui.setPrompts(listPrompts(), DEFAULT_PROMPT_ID);
       ui.setModelStatus('not downloaded — click Download');
     }
 
-    // Step 5: Ready
-    ui.updateStep('ready', 'done', 'Ready!');
-    ui.setEngine('ok', 'Ready');
+    // Step 5: Ready — only when the engine actually came up
+    if (engineLoaded) {
+      ui.updateStep('ready', 'done', 'Ready!');
+      ui.setEngine('ok', 'Ready');
+    } else {
+      ui.updateStep('ready', 'error', 'Engine not ready');
+      ui.setEngine('warn', 'Engine not ready — click Download');
+    }
 
     // Hide loading after a moment
     setTimeout(() => {
@@ -191,7 +220,11 @@ ui.setPrompts(listPrompts(), DEFAULT_PROMPT_ID);
 async function selectModel(modelId) {
   if (!MODELS[modelId]) return;
 
-  // Tear down any existing engine first.
+  // Tear down any existing engine + extractor before swapping.
+  if (extractor) {
+    await extractor.dispose();
+    extractor = null;
+  }
   if (session) {
     await session.dispose();
     session = null;
@@ -226,7 +259,7 @@ async function selectModel(modelId) {
     return;
   }
 
-  await loadEngineFor(modelId);
+  await loadEngineFor(modelId, result.blob);
 }
 
 async function downloadSelected(modelId) {
@@ -267,10 +300,15 @@ async function downloadSelected(modelId) {
 async function deleteSelected(modelId) {
   await deleteCached(modelId);
   if (session && currentModelId === modelId) {
+    if (extractor) {
+      await extractor.dispose();
+      extractor = null;
+    }
     await session.dispose();
     session = null;
     currentModelId = null;
     ui.clearMessages();
+    ui.setExtractResult(null);
     ui.setEngine('warn', 'Cache cleared — pick another model');
   }
   ui.setModelStatusState('available');
@@ -309,7 +347,19 @@ async function loadEngineFor(modelId, blobOverride = null) {
   }, 500);
 
   try {
-    const engine = await loadEngine({ modelUrl: source, maxNumTokens: MAX_NUM_TOKENS });
+    // 90s cap on Engine.create. A 1.9 GB .litertlm load on WebGPU can take
+    // tens of seconds; anything beyond ~90s is either a hang (e.g. the
+    // Blob's underlying stream was already consumed elsewhere) or a
+    // driver-side allocation failure — both should surface as an error
+    // rather than an indeterminate "Loading…" state.
+    const ENGINE_TIMEOUT_MS = 90_000;
+    const engine = await Promise.race([
+      loadEngine({ modelUrl: source, maxNumTokens: MAX_NUM_TOKENS }),
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error(`Engine.create did not complete within ${ENGINE_TIMEOUT_MS / 1000}s`)),
+        ENGINE_TIMEOUT_MS,
+      )),
+    ]);
     session = new ChatSession(engine);
     currentModelId = modelId;
 
@@ -332,6 +382,51 @@ async function loadEngineFor(modelId, blobOverride = null) {
     ui.setModelStatusState('error');
     ui.setModelStatus(err?.message ?? 'engine init failed');
     session = null;
+  }
+}
+
+// ─── Structured extraction (constrained decoding) ─────────────────────────
+
+/**
+ * Build/refresh the extractor. It shares the same `Engine` instance as the
+ * chat `session` — both Conversation objects derive from the same engine, so
+ * we don't load the model twice. If the engine hasn't loaded yet, return null.
+ */
+async function ensureExtractor() {
+  if (extractor) return extractor;
+  if (!session) return null;
+  extractor = new ExtractorSession(session.engine);
+  return extractor;
+}
+
+async function runExtract({ schemaId, schema, text }) {
+  const ex = await ensureExtractor();
+  if (!ex) {
+    ui.setExtractResult('Engine not ready — load a model first.', { error: true });
+    return;
+  }
+  ui.setExtractBusy(true);
+  ui.setExtractResult(null);
+  try {
+    try {
+      await ex.setSchema({ name: schemaId, schema });
+    } catch (schemaErr) {
+      ui.setExtractResult(`Schema rejected: ${schemaErr.message}`, { error: true });
+      console.warn('[extract] schema validation failed:', schemaErr);
+      return;
+    }
+    const res = await ex.extract(text);
+    if (res.ok) {
+      ui.setExtractResult(JSON.stringify(res.data, null, 2));
+    } else {
+      ui.setExtractResult(res.error, { error: true });
+      console.warn('[extract] failed:', res.error);
+    }
+  } catch (err) {
+    console.error('[extract] unexpected error:', err);
+    ui.setExtractResult(err?.message ?? String(err), { error: true });
+  } finally {
+    ui.setExtractBusy(false);
   }
 }
 

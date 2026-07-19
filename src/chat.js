@@ -148,3 +148,153 @@ export class ChatSession {
     }
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ExtractorSession — constrained-decoding wrapper for structured output.
+//
+// One conversation = one schema. Calling setSchema() builds a fresh
+// Conversation whose preface declares a single function-calling tool whose
+// `parameters` IS the user's JSON Schema, with `enableConstrainedDecoding`
+// turned on. Under the hood the runtime filters every sampled token against
+// the grammar derived from the schema, so the model's final
+// `tool_calls[0].function.arguments` is JSON valid by construction.
+//
+// API surface vs. the (non-existent) LiteRTLmSession.create({decodingConstraint}):
+// we use what `@litert-lm/core@0.14.0` actually exposes — see
+// node_modules/@litert-lm/core/dist/conversation_config.d.ts. The C++ core
+// offers the same path via `OptionalArgs.decoding_constraint = kJsonSchema`.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LITER_T_SCHEMA_TYPES = new Set([
+  'object', 'array', 'string', 'number', 'integer', 'boolean', 'null',
+]);
+
+/**
+ * Throw early if the schema has features LiteRT-LM doesn't support, so users
+ * see a clear message at click-time instead of a decode-time confusion.
+ * @param {unknown} schema
+ */
+export function assertValidLiteRtSchema(schema) {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+    throw new Error('Schema must be a JSON object.');
+  }
+  const s = /** @type {{ type?: string, properties?: object, required?: unknown, items?: unknown }} */ (schema);
+  if (s.type !== undefined && !LITER_T_SCHEMA_TYPES.has(s.type)) {
+    throw new Error(
+      `Unsupported schema type "${s.type}". LiteRT-LM supports: ${[...LITER_T_SCHEMA_TYPES].join(', ')}.`
+    );
+  }
+  if (s.type === 'object' && s.properties && typeof s.properties !== 'object') {
+    throw new Error('"properties" must be an object.');
+  }
+  if (s.required !== undefined && !Array.isArray(s.required)) {
+    throw new Error('"required" must be an array of strings.');
+  }
+  for (const k of s.required ?? []) {
+    if (typeof k !== 'string') {
+      throw new Error('"required" entries must be strings (property names).');
+    }
+  }
+}
+
+export class ExtractorSession {
+  /** @param {import('@litert-lm/core').Engine} engine */
+  constructor(engine) {
+    this.engine = engine;
+    /** @type {import('@litert-lm/core').Conversation | null} */
+    this.conversation = null;
+    /** @type {string} */
+    this.activeSchemaName = '';
+  }
+
+  /**
+   * Build (or rebuild) the conversation for one schema. Each call tears down
+   * the previous conversation — different schemas need different tools.
+   *
+   * @param {{
+   *   name?: string,
+   *   description?: string,
+   *   schema: object,
+   *   systemPrompt?: string,
+   * }} opts
+   */
+  async setSchema({
+    name = 'extract',
+    description,
+    schema,
+    systemPrompt = 'You are a precise data extractor. Always respond by calling the provided tool.',
+  }) {
+    assertValidLiteRtSchema(schema);
+    const previous = this.conversation;
+    this.conversation = null;
+    if (previous) {
+      try { await previous.delete(); } catch (err) { console.warn('ExtractorSession: previous conversation delete failed:', err); }
+    }
+    this.activeSchemaName = name;
+    this.conversation = await this.engine.createConversation({
+      preface: {
+        messages: [{ role: 'system', content: systemPrompt }],
+        tools: [{
+          type: 'function',
+          function: {
+            name,
+            description: description ?? `Call ${name} with structured output.`,
+            parameters: schema,
+          },
+        }],
+      },
+      enableConstrainedDecoding: true,
+    });
+  }
+
+  /**
+   * Run extraction. Non-streaming — the constrained decoder produces a tool
+   * call token-by-token against the schema grammar; by the time it finishes
+   * the entire JSON is in `tool_calls[0].function.arguments`.
+   *
+   * @param {string} userText
+   * @returns {Promise<{ ok: true, data: unknown } | { ok: false, error: string }>}
+   */
+  async extract(userText) {
+    if (!this.conversation) {
+      return { ok: false, error: 'No schema configured. Call setSchema() first.' };
+    }
+    if (!userText || !userText.trim()) {
+      return { ok: false, error: 'Input is empty.' };
+    }
+    try {
+      const reply = await this.conversation.sendMessage(userText);
+      const call = reply?.tool_calls?.[0];
+      const raw = call?.function?.arguments;
+      if (!raw) {
+        return { ok: false, error: 'Model produced no structured output.' };
+      }
+      try {
+        return { ok: true, data: JSON.parse(raw) };
+      } catch (parseErr) {
+        // Should be unreachable under constrained decoding, but be defensive.
+        return {
+          ok: false,
+          error: `Model returned non-parseable JSON: ${parseErr.message}\nRaw: ${raw}`,
+        };
+      }
+    } catch (err) {
+      return { ok: false, error: err?.message ?? String(err) };
+    }
+  }
+
+  cancel() {
+    try { this.conversation?.cancel(); } catch (err) {
+      console.warn('ExtractorSession.cancel:', err);
+    }
+  }
+
+  async dispose() {
+    const conv = this.conversation;
+    this.conversation = null;
+    if (!conv) return;
+    try { await conv.delete(); } catch (err) {
+      console.warn('ExtractorSession.dispose:', err);
+    }
+  }
+}

@@ -15,6 +15,8 @@
  *   onDelete: (modelId: string) => void,
  *   onPromptPreset: (presetId: string) => void,
  *   onStorageBackendChange: (id: string) => void,
+ *   onExtract?: (req: { schemaId: string, schema: object | null, text: string }) => void,
+ *   onExtractCancel?: () => void,
  * }} handlers
  */
 export function mountChat(root, handlers) {
@@ -50,7 +52,14 @@ export function mountChat(root, handlers) {
   loadingOverlay.append(loadingHeader, loadingSteps);
 
   // ─── Header ────────────────────────────────────────────────────────────
-  const modelBadge = el('span', { class: 'model-badge' }, 'Loading…');
+  // modelBadge doubles as a "Download a model" affordance: clicking it opens
+  // the settings drawer and focuses the Download button (which lives inside
+  // the otherwise-collapsed panel).
+  const modelBadge = el('button', {
+    type: 'button',
+    class: 'model-badge',
+    'aria-label': 'Open settings and download a model',
+  }, 'Loading…');
   const headerLeft = el('div', { class: 'header-left' },
     el('h1', { class: 'app-title' }, 'Gemma Chat'),
     modelBadge,
@@ -183,6 +192,92 @@ export function mountChat(root, handlers) {
   let activeModelId = null;
   let settingsOpen = false;
 
+  // ─── Extract section (built lazily, inserted into settingsPanel below) ─
+  // The custom-schema textarea is hidden unless the user selects the
+  // `custom` schema, at which point `showCustomSchema(true)` is called.
+  const extractHeader = el('div', { class: 'settings-section-header' }, 'Structured extract');
+
+  const extractSchemaSelect = el('select', { id: 'extract-schema', class: 'extract-schema-select' });
+  /** @type {Array<{id: string, label: string, description?: string, schema: object|null, placeholder?: string}>} */
+  let schemaEntries = [];
+  let activeSchemaId = '';
+  /** @type {string|null} */
+  let customSchemaJson = null;
+  function refreshCustomSchemaVisibility() {
+    customSchemaRow.hidden = activeSchemaId !== 'custom';
+  }
+  const extractSchemaRow = el('div', { class: 'settings-row' },
+    el('label', { for: 'extract-schema' }, 'Schema'),
+    extractSchemaSelect,
+  );
+
+  const extractInputTextarea = el('textarea', {
+    id: 'extract-input',
+    class: 'system-prompt-input',
+    rows: '4',
+    placeholder: 'Paste the text to extract structured data from…',
+  });
+  const extractInputRow = el('div', { class: 'settings-row settings-row--prompt' },
+    el('label', { for: 'extract-input' }, 'Input'),
+    extractInputTextarea,
+  );
+
+  const customSchemaTextarea = el('textarea', {
+    id: 'extract-custom-schema',
+    class: 'system-prompt-input extract-schema-input',
+    rows: '5',
+    placeholder: '{"type":"object","properties":{…},"required":[…]}',
+  });
+  const customSchemaRow = el('div', { class: 'settings-row settings-row--prompt', hidden: '' },
+    el('label', { for: 'extract-custom-schema' }, 'Schema JSON'),
+    customSchemaTextarea,
+  );
+
+  const extractBtn = el('button', {
+    type: 'button',
+    class: 'btn btn-primary btn-sm',
+    id: 'extract-btn',
+  }, 'Extract');
+  const extractCancelBtn = el('button', {
+    type: 'button',
+    class: 'btn btn-ghost btn-sm',
+    id: 'extract-cancel-btn',
+    disabled: '',
+  }, 'Cancel');
+  const extractStatus = el('span', { class: 'model-status-text' });
+  const extractActionsRow = el('div', { class: 'model-actions' },
+    extractStatus,
+    extractCancelBtn,
+    extractBtn,
+  );
+
+  const extractOutputPre = el('pre', {
+    id: 'extract-output',
+    class: 'extract-output',
+    'aria-live': 'polite',
+  }, '');
+  const extractCopyBtn = el('button', {
+    type: 'button',
+    class: 'btn btn-sm btn-ghost extract-copy-btn',
+  }, 'Copy');
+  const extractOutputWrap = el('div', { class: 'extract-output-wrap' },
+    extractOutputPre,
+    extractCopyBtn,
+  );
+
+  // Insert Extract section into settingsPanel, just before the
+  // progress container, after modelActions.
+  const extractDivider = el('hr', { class: 'settings-divider' });
+  settingsPanel.append(
+    extractDivider,
+    extractHeader,
+    extractSchemaRow,
+    extractInputRow,
+    customSchemaRow,
+    extractActionsRow,
+    extractOutputWrap,
+  );
+
   // ─── Step management ───────────────────────────────────────────────────
   const steps = [];
 
@@ -257,15 +352,39 @@ export function mountChat(root, handlers) {
   }
 
   // ─── Toggle settings ──────────────────────────────────────────────────
+  function setSettingsOpen(open) {
+    settingsOpen = open;
+    settingsPanel.hidden = !open;
+  }
+
   settingsBtn.addEventListener('click', () => {
-    settingsOpen = !settingsOpen;
-    settingsPanel.hidden = !settingsOpen;
-    if (settingsOpen) {
-      settingsBtn.innerHTML = `<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round">
-        <path d="M18 6L6 18M6 6l12 12"/>
-      </svg>`;
-    } else {
-      settingsBtn.innerHTML = gearSvg;
+    setSettingsOpen(!settingsOpen);
+  });
+
+  // Open settings and surface the Download button. Used when the user clicks
+  // the model badge in the header — a natural anchor for "go fix this".
+  function openSettingsAndFocusDownload() {
+    if (!settingsOpen) setSettingsOpen(true);
+    modelActions.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    setTimeout(() => downloadBtn.focus({ preventScroll: true }), 50);
+  }
+
+  modelBadge.addEventListener('click', openSettingsAndFocusDownload);
+
+  // The status bar (sub-header) is also clickable, but ONLY when the label
+  // invites a download. For other states ("Ready", "Thinking…", etc.) the
+  // click is a no-op so the bar doesn't feel like a perpetual settings
+  // shortcut. The `data-actionable` attribute is toggled by `setStatus` below.
+  function openSettingsIfActionable() {
+    if (statusBar.dataset.actionable === 'true') {
+      openSettingsAndFocusDownload();
+    }
+  }
+  statusBar.addEventListener('click', openSettingsIfActionable);
+  statusBar.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      openSettingsIfActionable();
     }
   });
 
@@ -452,6 +571,66 @@ export function mountChat(root, handlers) {
     }
   });
 
+  // ─── Extract event handlers ────────────────────────────────────────────
+  extractSchemaSelect.addEventListener('change', () => {
+    activeSchemaId = extractSchemaSelect.value;
+    const entry = schemaEntries.find((s) => s.id === activeSchemaId);
+    if (entry?.placeholder) {
+      extractInputTextarea.placeholder = entry.placeholder;
+    }
+    refreshCustomSchemaVisibility();
+  });
+
+  customSchemaTextarea.addEventListener('input', () => {
+    customSchemaJson = customSchemaTextarea.value;
+  });
+
+  extractBtn.addEventListener('click', () => {
+    if (extractBtn.disabled) return;
+    const schemaEntry = schemaEntries.find((s) => s.id === activeSchemaId);
+    if (!schemaEntry) {
+      setExtractResult('No schema selected.', { error: true });
+      return;
+    }
+    const text = extractInputTextarea.value.trim();
+    if (!text) {
+      setExtractResult('Input is empty.', { error: true });
+      return;
+    }
+    let schema = schemaEntry.schema;
+    if (activeSchemaId === 'custom') {
+      const raw = customSchemaTextarea.value.trim();
+      if (!raw) {
+        setExtractResult('Custom schema is empty.', { error: true });
+        return;
+      }
+      try {
+        schema = JSON.parse(raw);
+      } catch (err) {
+        setExtractResult(`Custom schema is not valid JSON: ${err.message}`, { error: true });
+        return;
+      }
+    }
+    handlers.onExtract?.({ schemaId: activeSchemaId, schema, text });
+  });
+
+  extractCancelBtn.addEventListener('click', () => {
+    handlers.onExtractCancel?.();
+  });
+
+  extractCopyBtn.addEventListener('click', async () => {
+    const text = extractOutputPre.textContent ?? '';
+    if (!text.trim()) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      const original = extractCopyBtn.textContent;
+      extractCopyBtn.textContent = 'Copied ✓';
+      setTimeout(() => { extractCopyBtn.textContent = original; }, 1200);
+    } catch (err) {
+      console.warn('clipboard copy failed:', err);
+    }
+  });
+
   // ─── Public controller ─────────────────────────────────────────────────
   return {
     // Loading overlay methods
@@ -604,6 +783,14 @@ export function mountChat(root, handlers) {
       }
 
       statusText.textContent = displayText;
+
+      // Toggle the actionable hint: the bar's click handler only does
+      // anything when its label invites the user to fix something
+      // (typically: download a model). The CSS picks up data-actionable
+      // to show cursor + hover + focus affordances.
+      const isActionable = !!displayText && /(not ready|click download|not downloaded)/i.test(displayText);
+      statusBar.dataset.actionable = isActionable ? 'true' : '';
+      statusBar.tabIndex = isActionable ? 0 : -1;
     },
 
     setStorageAvailability({ crossOriginAvailable, preferred = 'cache' }) {
@@ -641,6 +828,49 @@ export function mountChat(root, handlers) {
 
     clearMessages() {
       messagesEl.replaceChildren();
+    },
+
+    // ─── Extract controller methods ──────────────────────────────────────
+    setSchemas(entries, activeId) {
+      schemaEntries = entries ?? [];
+      activeSchemaId = activeId || (schemaEntries[0]?.id ?? '');
+      extractSchemaSelect.replaceChildren();
+      for (const entry of schemaEntries) {
+        extractSchemaSelect.append(el('option', { value: entry.id }, entry.label));
+      }
+      if (activeSchemaId) extractSchemaSelect.value = activeSchemaId;
+      const entry = schemaEntries.find((s) => s.id === activeSchemaId);
+      if (entry?.placeholder) {
+        extractInputTextarea.placeholder = entry.placeholder;
+      }
+      refreshCustomSchemaVisibility();
+    },
+
+    /**
+     * Show a result in the Extract output area. Pass null to clear it.
+     * @param {string | null} text
+     * @param {{ error?: boolean }} [opts]
+     */
+    setExtractResult(text, opts = {}) {
+      extractOutputPre.textContent = text ?? '';
+      extractOutputPre.dataset.error = opts.error ? 'true' : '';
+      extractCopyBtn.disabled = !text?.trim();
+    },
+
+    /**
+     * Toggle the Extract UI between idle and busy states. While busy, the
+     * Extract button is replaced visually by "Extracting…" and the cancel
+     * button is enabled.
+     * @param {boolean} busy
+     */
+    setExtractBusy(busy) {
+      extractBtn.disabled = !!busy;
+      extractBtn.textContent = busy ? 'Extracting…' : 'Extract';
+      extractCancelBtn.disabled = !busy;
+      extractSchemaSelect.disabled = !!busy;
+      extractInputTextarea.disabled = !!busy;
+      customSchemaTextarea.disabled = !!busy;
+      extractStatus.textContent = busy ? 'running…' : '';
     },
   };
 }

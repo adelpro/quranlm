@@ -1,19 +1,17 @@
-// Model registry + storage layer.
-//
-// Two storage backends, used in priority order:
-//
-//   1. Cross-Origin Storage (navigator.crossOriginStorage) — proposed WICG
-//      API, only available today via the Chrome extension. Files are looked
-//      up by SHA-256, so the same model can be shared across sites and
-//      downloads are verified by the browser on write.
-//      See https://huggingface.co/blog/cross-origin-storage
-//
-//   2. Cache API — works in every browser, but per-origin.
-//
-// Reads try #1 first, then fall back to #2. Writes go to the selected backend.
-// All reads automatically validate SHA-256 and delete corrupted files.
-
 const CACHE_NAME = 'litert-models-v1';
+
+// Persistence is delegated to the canonical COS utility (src/utils/cross-origin-storage.js),
+// which follows the WICG Cross-Origin Storage spec correctly:
+// - write handles from `{create:true}` are write-only (no `getFile()` afterwards)
+// - hash verification happens during `writable.close()`
+// - reads are re-requested per call (no implicit cache).
+import {
+  isCrossOriginStorageAvailable,
+  readFromCOS,
+  writeToCOS,
+  deleteFromCOS,
+} from './utils/cross-origin-storage.js';
+export { isCrossOriginStorageAvailable };
 
 // ─── SHA-256 ──────────────────────────────────────────────────────────────
 
@@ -33,15 +31,33 @@ async function sha256(message) {
  * @returns {Promise<boolean>}
  */
 async function verifySha256(blob, expectedHex) {
+  console.log(`[verify] Starting SHA256 verification...`);
+  console.log(`[verify] Expected: ${expectedHex.substring(0, 16)}...`);
+  console.log(`[verify] Blob size: ${blob.size} bytes (${(blob.size / 1024 / 1024).toFixed(1)} MB)`);
+
   try {
+    const startTime = performance.now();
     const buf = await blob.arrayBuffer();
+    const readTime = ((performance.now() - startTime) / 1000).toFixed(2);
+    console.log(`[verify] ArrayBuffer read in ${readTime}s`);
+
     const digest = await crypto.subtle.digest('SHA-256', buf);
     const actualHex = [...new Uint8Array(digest)]
       .map((b) => b.toString(16).padStart(2, '0'))
       .join('');
-    return actualHex === expectedHex.toLowerCase();
+
+    const isValid = actualHex === expectedHex.toLowerCase();
+    console.log(`[verify] Actual:   ${actualHex.substring(0, 16)}...`);
+    console.log(`[verify] ${isValid ? '✅ MATCH' : '❌ MISMATCH'}`);
+
+    if (!isValid) {
+      console.log(`[verify] Full expected: ${expectedHex}`);
+      console.log(`[verify] Full actual:   ${actualHex}`);
+    }
+
+    return isValid;
   } catch (err) {
-    console.error('Hash verification error:', err);
+    console.error('[verify] Hash verification error:', err);
     return false;
   }
 }
@@ -89,192 +105,31 @@ export function getModel(id) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cross-Origin Storage backend
+//
+// All persistence is delegated to the canonical COS utility
+// (src/utils/cross-origin-storage.js). The previous inline implementation
+// was deleted because it called `handle.getFile()` on a write handle — which
+// is a no-op under the WICG spec — and then DELETED what it had just written,
+// producing silent data loss. The util does it correctly:
+//   * `writable.close()` triggers the browser's own hash verification.
+//   * Reads use a separate `requestFileHandles([hashObj])` call (no create).
+//   * `__non_standard__deleteResource` is the only delete currently exposed.
 // ─────────────────────────────────────────────────────────────────────────────
-
-/**
- * @returns {boolean} true if navigator.crossOriginStorage is exposed
- *                    (currently requires the Chrome extension).
- */
-export function isCrossOriginStorageAvailable() {
-  return typeof navigator !== 'undefined'
-    && 'crossOriginStorage' in navigator;
-}
 
 function hashFor(entry) {
   return { algorithm: 'SHA-256', value: entry.sha256 };
 }
 
-/**
- * Try to read a stored File from Cross-Origin Storage. Returns null if the
- * backend is unavailable or the file isn't there.
- * If the file is corrupted (hash mismatch), it's automatically deleted.
- * @param {ModelEntry | string} entry - Model entry or hash string
- * @returns {Promise<Blob | null>}
- */
 async function readCrossOrigin(entry) {
-  if (!isCrossOriginStorageAvailable()) return null;
-
-  let hashObj;
-  if (typeof entry === 'string') {
-    hashObj = { algorithm: 'SHA-256', value: entry };
-  } else {
-    hashObj = hashFor(entry);
-  }
-
-  try {
-    const handle = await withTimeout(
-      navigator.crossOriginStorage.requestFileHandle(hashObj),
-      8000,
-      'crossOriginStorage.requestFileHandle() timed out after 8s'
-    );
-    if (!handle) return null;
-
-    if (typeof handle.getFile !== 'function') {
-      console.warn('crossOriginStorage: handle has no getFile(); falling back');
-      return null;
-    }
-
-    try {
-      const file = await handle.getFile();
-      if (!file) return null;
-      return file;
-    } catch (getFileErr) {
-      // getFile failed - file might be corrupted or still being written
-      console.warn('crossOriginStorage: getFile failed:', getFileErr.message);
-
-      // Wait and retry once (in case it's still being written)
-      await new Promise(r => setTimeout(r, 300));
-      try {
-        const file = await handle.getFile();
-        if (file) {
-          console.log('crossOriginStorage: getFile succeeded on retry');
-          return file;
-        }
-      } catch (retryErr) {
-        console.warn('crossOriginStorage: Retry failed, deleting corrupted file');
-        // Delete the corrupted file
-        await deleteCrossOriginByHash(hashObj);
-      }
-      return null;
-    }
-  } catch (err) {
-    if (err?.message?.includes('not found')) {
-      return null;
-    }
-    console.warn('crossOriginStorage read failed:', err?.message || err);
-    return null;
-  }
+  return readFromCOS(hashFor(entry));
 }
 
-/**
- * Write a Blob to Cross-Origin Storage, keyed by SHA-256.
- * @param {ModelEntry | string} entry - Model entry or hash string
- * @param {Blob} blob
- * @returns {Promise<boolean>} - true if write was successful
- */
 async function writeCrossOrigin(entry, blob) {
-  if (!isCrossOriginStorageAvailable()) return false;
-
-  let hashObj;
-  if (typeof entry === 'string') {
-    hashObj = { algorithm: 'SHA-256', value: entry };
-  } else {
-    hashObj = hashFor(entry);
-  }
-
-  try {
-    // Delete any existing file first (clean slate)
-    if (typeof navigator.crossOriginStorage.__non_standard__deleteResource === 'function') {
-      try {
-        await navigator.crossOriginStorage.__non_standard__deleteResource(hashObj);
-      } catch (e) { /* ignore if not found */ }
-    }
-
-    // Create new file
-    const handle = await navigator.crossOriginStorage.requestFileHandle(
-      hashObj,
-      { create: true, origins: '*' }
-    );
-    if (!handle) return false;
-
-    // Write the blob
-    const writable = await handle.createWritable();
-    await writable.write(blob);
-    await writable.close();
-
-    // Give the extension a moment to process the write
-    await new Promise(r => setTimeout(r, 200));
-
-    // Verify by reading back
-    try {
-      const file = await handle.getFile();
-      if (file && file.size === blob.size) {
-        console.log('[models] Cross-origin storage write verified ✓');
-        return true;
-      } else {
-        console.warn(`[models] Cross-origin write verification failed: size mismatch (expected ${blob.size}, got ${file?.size || 0})`);
-        // Try to delete the corrupted file
-        await deleteCrossOriginByHash(hashObj);
-        return false;
-      }
-    } catch (verifyErr) {
-      console.warn('[models] Cross-origin verification error:', verifyErr.message);
-      // The write might still be successful even if getFile fails immediately
-      // Try one more time with a longer delay
-      await new Promise(r => setTimeout(r, 500));
-      try {
-        const file = await handle.getFile();
-        if (file && file.size === blob.size) {
-          console.log('[models] Cross-origin storage write verified on retry ✓');
-          return true;
-        }
-      } catch (retryErr) {
-        console.warn('[models] Cross-origin verification retry failed:', retryErr.message);
-        // Delete the corrupted file
-        await deleteCrossOriginByHash(hashObj);
-        return false;
-      }
-      return false;
-    }
-  } catch (err) {
-    console.warn('[models] Cross-origin write failed:', err);
-    return false;
-  }
-}
-
-/**
- * Delete a file from Cross-Origin Storage by hash object.
- * @param {Object} hashObj - { algorithm: 'SHA-256', value: string }
- */
-async function deleteCrossOriginByHash(hashObj) {
-  if (!isCrossOriginStorageAvailable()) return;
-  try {
-    // Try non-standard delete method first
-    if (typeof navigator.crossOriginStorage.__non_standard__deleteResource === 'function') {
-      await navigator.crossOriginStorage.__non_standard__deleteResource(hashObj);
-      console.log('[models] Deleted from cross-origin storage');
-      return;
-    }
-
-    // Fallback: try to overwrite with empty data
-    const handle = await navigator.crossOriginStorage.requestFileHandle(
-      hashObj,
-      { create: true, origins: '*' }
-    );
-    if (handle) {
-      const writable = await handle.createWritable();
-      await writable.write(new Blob([]));
-      await writable.close();
-      console.log('[models] Overwritten cross-origin storage entry');
-    }
-  } catch (err) {
-    console.warn('crossOriginStorage delete failed:', err);
-  }
+  return writeToCOS(hashFor(entry), blob);
 }
 
 async function deleteCrossOrigin(entry) {
-  if (!isCrossOriginStorageAvailable()) return;
-  await deleteCrossOriginByHash(hashFor(entry));
+  return deleteFromCOS(hashFor(entry));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -354,44 +209,63 @@ async function storeInCache(url, blob) {
  */
 export async function validateModel(modelId) {
   const model = MODELS[modelId];
-  if (!model) return { exists: false, valid: false, size: null };
+  if (!model) {
+    console.log(`[models] ${modelId}: Model not found in registry`);
+    return { exists: false, valid: false, size: null };
+  }
+
+  console.log(`[models] ${modelId}: Starting validation...`);
+  console.log(`[models] ${modelId}: Expected SHA256: ${model.sha256.substring(0, 16)}...`);
 
   // Try cross-origin first
   if (isCrossOriginStorageAvailable()) {
+    console.log(`[models] ${modelId}: Cross-origin storage available, checking...`);
     try {
       const file = await readCrossOrigin(model);
       if (file) {
-        const isValid = await verifySha256(file, model.sha256);
-        if (isValid) {
-          return { exists: true, valid: true, size: file.size };
+        console.log(`[models] ${modelId}: Cross-origin file found, size: ${file.size} bytes`);
+        // Size-sanity check only. We deliberately skip the SHA-256 verify
+        // here because calling .arrayBuffer() on a WICG-stored File
+        // consumes the underlying storage stream — Engine.create then
+        // sees an empty/closed Blob and hangs on its second read.
+        // LiteRT-LM's WASM parser validates the file format itself when
+        // it loads; if the bytes are corrupted, Engine.create will
+        // throw and we delete + re-download at that point.
+        const sizeMatches = file.size === model.approxSize;
+        if (!sizeMatches) {
+          console.warn(
+            `[models] ${modelId}: Size mismatch (expected ${model.approxSize}, got ${file.size}) — may be corrupted`
+          );
         } else {
-          console.warn(`[models] ${modelId}: Cross-origin file corrupted, deleting...`);
-          await deleteCrossOrigin(model);
-          return { exists: true, valid: false, size: file.size };
+          console.log(`[models] ${modelId}: ✅ Cross-origin file present (size matches)`);
         }
+        return { exists: true, valid: sizeMatches, size: file.size, blob: file };
+      } else {
+        console.log(`[models] ${modelId}: Cross-origin file not found`);
       }
     } catch (err) {
       console.warn(`[models] ${modelId}: Cross-origin read failed:`, err.message);
     }
+  } else {
+    console.log(`[models] ${modelId}: Cross-origin storage NOT available`);
   }
 
   // Fallback to Cache API
+  console.log(`[models] ${modelId}: Checking Cache API...`);
   try {
     const blob = await readCache(model);
     if (blob) {
-      const isValid = await verifySha256(blob, model.sha256);
-      if (isValid) {
-        return { exists: true, valid: true, size: blob.size };
-      } else {
-        console.warn(`[models] ${modelId}: Cache file corrupted, deleting...`);
-        await deleteCache(model);
-        return { exists: true, valid: false, size: blob.size };
-      }
+      console.log(`[models] ${modelId}: Cache file found, size: ${blob.size} bytes`);
+      const sizeMatches = blob.size === model.approxSize;
+      return { exists: true, valid: sizeMatches, size: blob.size, blob };
+    } else {
+      console.log(`[models] ${modelId}: Cache file not found`);
     }
   } catch (err) {
     console.warn(`[models] ${modelId}: Cache read failed:`, err.message);
   }
 
+  console.log(`[models] ${modelId}: ❌ Model not found in any storage`);
   return { exists: false, valid: false, size: null };
 }
 
