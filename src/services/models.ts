@@ -299,7 +299,7 @@ export async function downloadModel(
   const entry = getModel(modelId);
   if (!entry) throw new Error(`Unknown model: ${modelId}`);
 
-  const { onProgress, signal, preferredStorage = 'cache' } = options;
+  const { onProgress, signal, preferredStorage = 'cross-origin' } = options;
   const useCrossOrigin = preferredStorage === 'cross-origin' && isCrossOriginStorageAvailable();
 
   onProgress?.({ downloaded: 0, total: null, phase: 'fetching' });

@@ -9,6 +9,7 @@
 import { atom } from 'jotai';
 import { atomWithStorage } from 'jotai/utils';
 import { isModelId, type ModelId } from '../../data/models';
+import { isCrossOriginStorageAvailable } from '../../services/cross-origin-storage';
 
 export type ModelStatus = 'unknown' | 'missing' | 'cached' | 'downloading' | 'error';
 
@@ -69,7 +70,7 @@ export type StorageBackendPref = 'cache' | 'cross-origin';
 
 export const preferredStorageAtom = atomWithStorage<StorageBackendPref>(
   'litert-storage-pref',
-  'cache',
+  isCrossOriginStorageAvailable() ? 'cross-origin' : 'cache',
   undefined,
   { getOnInit: true },
 );
