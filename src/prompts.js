@@ -3,9 +3,13 @@
 // in the dropdown and copies `text` into the system-prompt textarea when
 // selected.
 //
-// The quranic-ar prompt's "مخطط الـ JSON" block describes the output shape
-// the model should produce. The same shape is the default in
+// The quranic-ar prompt's "مخطط الـ JSON" block describes the JSON shape
+// the model must produce. The same shape is the default in
 // src/output-format.js (quranic terms). If you change one, change the other.
+//
+// Quran-search verses for each `related_words[].term` are looked up by
+// the client (src/main.js `autoSearchTerms`) — the model never calls a
+// tool in this flow.
 
 export const PROMPTS = {
   'quranic-ar': {

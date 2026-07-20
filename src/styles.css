@@ -958,3 +958,181 @@ body {
   font-size: 11px;
   padding: 3px 8px;
 }
+
+/* ─── Tools section (Quran auto-search) ────────────────────────────────── */
+
+.tool-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+
+.tool-toggle input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+.extraction-sources {
+  margin-top: 14px;
+  border-left: 3px solid var(--accent);
+  padding: 6px 0 6px 12px;
+  background: var(--surface-2);
+  border-radius: 0 6px 6px 0;
+  font-size: 13px;
+}
+
+.extraction-sources[data-state="loading"] .sources-header .sources-title::after {
+  content: "";
+}
+
+.extraction-sources .sources-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 8px;
+}
+
+.extraction-sources .sources-icon {
+  font-size: 14px;
+}
+
+.extraction-sources .sources-title {
+  flex: 1 1 auto;
+}
+
+.extraction-sources .sources-errors {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+.extraction-sources .term-error {
+  color: var(--error);
+  font-size: 12px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+.extraction-sources .term-block {
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+  margin-top: 6px;
+}
+
+.extraction-sources .term-block:first-of-type {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0;
+}
+
+.extraction-sources .term-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  font-weight: 600;
+  color: var(--text);
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+
+.extraction-sources .term-header:hover {
+  background: var(--surface-1);
+}
+
+.extraction-sources .term-header:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.extraction-sources .term-name {
+  flex: 0 0 auto;
+  font-family: "Amiri", "Scheherazade New", "Traditional Arabic", "Noto Naskh Arabic", serif;
+  font-size: 15px;
+}
+
+.extraction-sources .term-count {
+  flex: 1 1 auto;
+  font-size: 11px;
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.extraction-sources .term-caret {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.extraction-sources .term-verses {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 6px 0;
+}
+
+.extraction-sources .term-verses[hidden] {
+  display: none;
+}
+
+.extraction-sources .term-empty {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: 12px;
+}
+
+.extraction-sources .verse {
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.extraction-sources .verse:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.extraction-sources .verse-ref {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--accent);
+  margin-bottom: 4px;
+  text-transform: uppercase;
+}
+
+.extraction-sources .verse-text {
+  font-size: 22px;
+  line-height: 1.9;
+  color: var(--text);
+  margin: 4px 0;
+  font-family: "Amiri", "Scheherazade New", "Traditional Arabic", "Noto Naskh Arabic", serif;
+}
+
+.extraction-sources .verse-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.raw-reply-fallback {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: var(--surface-1);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-muted);
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}

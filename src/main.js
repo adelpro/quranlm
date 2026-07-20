@@ -21,10 +21,17 @@ import {
 } from './models.js';
 import { DEFAULT_PROMPT_ID, listPrompts, getPrompt } from './prompts.js';
 import { DEFAULT_OUTPUT_FORMAT } from './output-format.js';
+import {
+  executeQuranSearch,
+  ensureLoaded as ensureQuranLoaded,
+  onStatusChange as onQuranSearchStatus,
+  getToolStatus as getQuranSearchStatus,
+} from './quran-search-tool.js';
 
 const MAX_NUM_TOKENS = 8192;
 const STORAGE_KEY = 'litert-storage-backend';
 const MODEL_KEY = 'litert-selected-model';
+const TOOL_KEY = 'litert-tool-quran-search';
 
 const appEl = document.getElementById('app');
 
@@ -52,6 +59,23 @@ function saveModelPreference(modelId) {
   localStorage.setItem(MODEL_KEY, modelId);
 }
 
+// ─── Tool toggle persistence ────────────────────────────────────────────
+function loadToolPreferences() {
+  return { quranSearch: localStorage.getItem(TOOL_KEY) !== 'false' };   // default ON
+}
+function saveToolPreference(name, enabled) {
+  localStorage.setItem(TOOL_KEY, String(enabled));
+}
+
+/** @type {{ quranSearch: boolean }} */
+let toolsEnabled = loadToolPreferences();
+
+/** Tool toggle in Settings — controls whether the client auto-runs
+ *  `executeQuranSearch` for each term extracted from a JSON reply. */
+function isAutoSearchEnabled() {
+  return toolsEnabled.quranSearch;
+}
+
 // ─── Mount UI ─────────────────────────────────────────────────────────────
 const ui = mountChat(appEl, {
   onSend: (text) => { void sendMessage(text); },
@@ -67,6 +91,7 @@ const ui = mountChat(appEl, {
   onPromptPreset: (id) => { void applyPromptPreset(id); },
   onStorageBackendChange: (id) => { setPreferredStorage(id); },
   onOutputFormatChange: (text) => { void applyOutputFormat(text); },
+  onToolToggle: (name, enabled) => { void onToolToggle(name, enabled); },
 });
 
 /** @type {ChatSession | null} */
@@ -91,6 +116,14 @@ ui.setStorageAvailability({
 });
 ui.setPrompts(listPrompts(), DEFAULT_PROMPT_ID);
 ui.setOutputFormat(DEFAULT_OUTPUT_FORMAT);
+ui.setToolsAvailability({ quranSearch: { enabled: toolsEnabled.quranSearch } });
+ui.setToolStatus('quran_search', {
+  status: getQuranSearchStatus(),
+  detail: '',
+});
+onQuranSearchStatus((status, detail) => {
+  ui.setToolStatus('quran_search', { status, detail });
+});
 // Seed the parser + apply handler so the initial schema is honored without
 // waiting for the user to type.
 void applyOutputFormat(DEFAULT_OUTPUT_FORMAT);
@@ -446,8 +479,9 @@ async function applyOutputFormat(text) {
   outputSchema = parsed;
   ui.setOutputFormatStatus({ state: 'on', message: 'Structured output: ON' });
   if (session) {
-    try { await session.setConfig({ outputSchema: parsed }); }
-    catch (err) {
+    try {
+      await session.setConfig({ outputSchema: parsed });
+    } catch (err) {
       console.warn('apply schema failed:', err);
       ui.setOutputFormatStatus({ state: 'invalid', message: `Apply failed: ${err.message}` });
     }
@@ -459,7 +493,10 @@ async function applyOutputFormat(text) {
 async function applySystemPrompt(text) {
   if (!session) return;
   try {
-    await session.setConfig({ systemPrompt: text });
+    await session.setConfig({
+      systemPrompt: text,
+      outputSchema,
+    });
   } catch (err) {
     console.error('setConfig failed:', err);
     ui.appendError(`System prompt change failed: ${err?.message ?? err}`);
@@ -476,12 +513,144 @@ async function applyPromptPreset(presetId) {
 async function resetConversation() {
   if (!session) return;
   try {
-    await session.setConfig({ systemPrompt: ui.getSystemPrompt() });
+    await session.setConfig({
+      systemPrompt: ui.getSystemPrompt(),
+      outputSchema,
+    });
     ui.clearMessages();
   } catch (err) {
     console.error('reset failed:', err);
     ui.appendError(`Reset failed: ${err?.message ?? err}`);
   }
+}
+
+/** Tool toggle handler — only flips the auto-search boolean. The model
+ *  no longer sees a search tool, so the chat session doesn't need to be
+ *  rebuilt. */
+async function onToolToggle(name, enabled) {
+  if (name !== 'quran_search') return;
+  toolsEnabled.quranSearch = !!enabled;
+  saveToolPreference(name, toolsEnabled.quranSearch);
+}
+
+/**
+ * Pull a JSON object out of an assistant reply. Handles three shapes:
+ *   1. Pure JSON (constrained-decoded path) — `JSON.parse(text)` succeeds.
+ *   2. Markdown-fenced JSON — model emits ```json\n{...}\n``` even when the
+ *      schema asks for plain JSON; we strip the fence first.
+ *   3. Prose with a leading JSON block — extract the first {...} span.
+ *
+ * Returns the parsed object or `null` when extraction fails.
+ */
+function extractJsonFromReply(text) {
+  if (!text) return null;
+  // Strip a leading Markdown ```json...``` or ```...``` fence (with or without
+  // a language tag). Non-greedy so we don't eat more than one fence.
+  const fenced = text.match(/```(?:[a-zA-Z][\w-]*\s*)?\n?([\s\S]*?)\n?```/);
+  if (fenced) {
+    try { return JSON.parse(fenced[1]); }
+    catch { /* fall through to plain-parse */ }
+  }
+  // Look for the first balanced {...} or [...] span.
+  const firstBrace = text.indexOf('{');
+  const firstBracket = text.indexOf('[');
+  const candidates = [firstBrace, firstBracket].filter((i) => i >= 0);
+  if (candidates.length === 0) return null;
+  const start = Math.min(...candidates);
+  // Walk from `start` to the matching close, respecting nested braces/brackets
+  // and quoted strings (very small bracket-balancer — sufficient for our JSON).
+  const open = text[start];
+  const close = open === '{' ? '}' : ']';
+  let depth = 0;
+  let inStr = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (escape) { escape = false; continue; }
+      if (ch === '\\') { escape = true; continue; }
+      if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') { inStr = true; continue; }
+    if (ch === open) depth++;
+    else if (ch === close) {
+      depth--;
+      if (depth === 0) {
+        try { return JSON.parse(text.slice(start, i + 1)); }
+        catch { return null; }
+      }
+    }
+  }
+  try { return JSON.parse(text); }
+  catch { return null; }
+}
+
+/**
+ * After the assistant emits a JSON-shaped reply, walk its `related_words`
+ * array and run `executeQuranSearch` for each term, in parallel. Renders
+ * results inline below the JSON in the same bubble.
+ *
+ * Gated by:
+ *  - the auto-search toggle (Settings)
+ *  - a successfully-parsed JSON with at least one non-empty related_word
+ *
+ * Always renders the Sources header so the user can see whether auto-search
+ * attempted to run and, if it didn't, why. The header text reflects state:
+ *   "Looking up…"     — running
+ *   "No related terms" — JSON parsed but `related_words` is empty/absent
+ *   "Sources · N found" — verses fetched (or attempted) for N terms
+ *   "JSON parse failed" — reply didn't parse, raw text echoed for inspection
+ */
+async function autoSearchTerms(assistantEl, text) {
+  if (!assistantEl) return;
+
+  const parsed = extractJsonFromReply(text);
+  if (!parsed) {
+    // Render an error state so the user sees what happened instead of nothing.
+    ui.beginSources(assistantEl, ['(reply was not JSON)']);
+    ui.renderSources(assistantEl, [{
+      term: '(reply was not JSON)',
+      result: { ok: false, error: 'Reply did not contain JSON. Raw output shown below.' },
+    }]);
+    // Append the raw text to the message so the user can inspect it.
+    const pre = document.createElement('pre');
+    pre.className = 'raw-reply-fallback';
+    pre.textContent = text;
+    const content = assistantEl.querySelector('.message-content');
+    if (content) content.append(pre);
+    console.warn('[litert] autoSearchTerms: JSON.parse failed. Raw text was:\n', text);
+    return;
+  }
+
+  const terms = (Array.isArray(parsed?.related_words) ? parsed.related_words : [])
+    .map((w) => String(w?.term ?? '').trim())
+    .filter(Boolean);
+
+  if (terms.length === 0) {
+    // No terms to look up — still surface a Sources header so the user knows
+    // the post-extraction step ran and observed an empty array.
+    ui.beginSources(assistantEl, ['(no related terms)']);
+    ui.renderSources(assistantEl, [{
+      term: '(no related terms)',
+      result: { ok: true, total: 0, results: [] },
+    }]);
+    return;
+  }
+
+  ui.beginSources(assistantEl, terms);
+  // Kick off the corpus lazy-load idempotently — the load promise is shared.
+  void ensureQuranLoaded();
+  const results = await Promise.all(
+    terms.map(async (term) => {
+      try {
+        return { term, result: await executeQuranSearch({ query: term, limit: 8 }) };
+      } catch (err) {
+        return { term, result: { ok: false, error: err?.message ?? String(err) } };
+      }
+    }),
+  );
+  ui.renderSources(assistantEl, results);
 }
 
 async function sendMessage(text) {
@@ -490,16 +659,30 @@ async function sendMessage(text) {
   const assistantEl = ui.appendStreamingMessage();
   const t0 = performance.now();
   ui.setEngine('warn', 'Thinking…');
+  let jsonReply = null;
   try {
     for await (const chunk of session.sendStream(text)) {
-      if (assistantEl.dataset.started !== 'true') {
-        const firstToken = ((performance.now() - t0) / 1000).toFixed(1);
-        ui.setEngine('ok', `First token in ${firstToken}s`);
+      // chat.js yields plain string fragments again (v1 shape)
+      if (chunk) {
+        if (assistantEl.dataset.started !== 'true') {
+          const firstToken = ((performance.now() - t0) / 1000).toFixed(1);
+          ui.setEngine('ok', `First token in ${firstToken}s`);
+        }
+        ui.appendToMessage(assistantEl, chunk);
+        // Track the reply text so we can attempt auto-search post-stream.
+        // (Only relevant when outputSchema is set; we still parse regardless
+        // — JSON.parse returns silently on free-form prose.)
+        jsonReply = (jsonReply ?? '') + chunk;
       }
-      ui.appendToMessage(assistantEl, chunk);
     }
     const total = ((performance.now() - t0) / 1000).toFixed(1);
     ui.setEngine('ok', `Reply complete · ${total}s`);
+
+    // Auto-search: only when the toggle is on AND the model emitted a
+    // constrained JSON reply (which we can parse for related_words).
+    if (isAutoSearchEnabled() && jsonReply) {
+      await autoSearchTerms(assistantEl, jsonReply);
+    }
   } catch (err) {
     console.error('sendStream failed:', err);
     ui.appendError(`Generation error: ${err?.message ?? err}`);

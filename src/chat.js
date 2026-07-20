@@ -62,11 +62,18 @@ export async function loadEngine({ modelUrl, maxNumTokens = DEFAULT_MAX_TOKENS }
 }
 
 /**
- * Stateful chat session: owns one Engine + one Conversation.
- * Re-applying the config (system prompt and/or output schema) creates a
- * new Conversation (history resets). Pass `outputSchema: null` to chat in
- * free-form mode; pass a JSON-Schema object to constrain every reply to
- * that shape via a single function tool + `enableConstrainedDecoding`.
+ * Stateful chat session. Two modes, picked per `setConfig` call:
+ *
+ *   1. Free-form (no schema) — `Conversation` with `sendMessageStreaming`.
+ *      Yields text fragments as they arrive.
+ *
+ *   2. Constrained structured output (outputSchema set) —
+ *      `Conversation` with `enableConstrainedDecoding + a single `respond` tool.
+ *      Reads `tool_calls[0].function.arguments`, pretty-prints, yields that.
+ *
+ * Tool-calling from the model is intentionally NOT supported — search is
+ * driven entirely by the client (see `main.js` auto-search after JSON
+ * extraction). The runtime only ever sees the `respond` tool.
  */
 export class ChatSession {
   /** @param {import('@litert-lm/core').Engine} engine */
@@ -82,6 +89,7 @@ export class ChatSession {
 
   /**
    * Apply (or re-apply) the conversation config. Creates a new Conversation.
+   * `outputSchema: null` → chat reverts to free-form.
    *
    * @param {{
    *   systemPrompt?: string,
@@ -92,18 +100,20 @@ export class ChatSession {
     if (systemPrompt !== undefined) {
       this.systemPrompt = (systemPrompt ?? '').trim();
     }
-    this.outputSchema = outputSchema;
     if (outputSchema) {
       assertValidLiteRtSchema(outputSchema);
     }
+    this.outputSchema = outputSchema;
 
-    /** @type {import('@litert-lm/core').ConversationConfig} */
-    const config = {
-      preface: {
-        messages: [{ role: 'system', content: this.systemPrompt }],
-      },
-    };
+    await this._teardownConversation();
+
     if (outputSchema) {
+      const config = {
+        preface: {
+          messages: [{ role: 'system', content: this.systemPrompt }],
+        },
+        enableConstrainedDecoding: true,
+      };
       config.preface.tools = [{
         type: 'function',
         function: {
@@ -112,8 +122,14 @@ export class ChatSession {
           parameters: outputSchema,
         },
       }];
-      config.enableConstrainedDecoding = true;
+      this.conversation = await this.engine.createConversation(config);
+      return;
     }
+
+    // Free-form path
+    const config = {
+      preface: { messages: [{ role: 'system', content: this.systemPrompt }] },
+    };
     this.conversation = await this.engine.createConversation(config);
   }
 
@@ -123,7 +139,7 @@ export class ChatSession {
    * @param {string} prompt
    */
   async setSystemPrompt(prompt) {
-    return this.setConfig({ systemPrompt: prompt, outputSchema: this.outputSchema });
+    return this.setConfig({ systemPrompt: prompt });
   }
 
   /**
@@ -205,14 +221,17 @@ export class ChatSession {
 
   /** Free GPU/WASM resources. Safe to call multiple times. */
   async dispose() {
-    const engine = this.engine;
+    await this._teardownConversation();
     this.engine = null;
+  }
+
+  async _teardownConversation() {
+    const conv = this.conversation;
     this.conversation = null;
-    if (!engine) return;
-    try {
-      await engine.delete();
-    } catch (err) {
-      console.warn('ChatSession.dispose:', err);
+    if (!conv) return;
+    try { await conv.delete(); }
+    catch (err) {
+      console.warn('ChatSession teardown:', err);
     }
   }
 }

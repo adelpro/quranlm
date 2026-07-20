@@ -18,6 +18,7 @@ import { formatBytes, formatEta } from './utils/format.js';
  *   onPromptPreset: (presetId: string) => void,
  *   onStorageBackendChange: (id: string) => void,
  *   onOutputFormatChange?: (text: string) => void,
+ *   onToolToggle?: (name: string, enabled: boolean) => void,
  * }} handlers
  */
 export function mountChat(root, handlers) {
@@ -218,6 +219,30 @@ export function mountChat(root, handlers) {
     outputFormatHeader,
     outputFormatRow,
     outputFormatFooter,
+  );
+
+  // ─── Tools section (Quran search tool) ─────────────────────────────────
+  const toolsHeader = el('div', { class: 'settings-section-header' }, 'Tools');
+
+  const quranToggle = el('input', {
+    type: 'checkbox',
+    id: 'tool-quran-search',
+  });
+  const quranToggleLabel = el('label', { class: 'tool-toggle', for: 'tool-quran-search' },
+    quranToggle,
+    'Auto-search Quran terms after extraction',
+  );
+  const quranToggleRow = el('div', { class: 'settings-row' }, quranToggleLabel);
+
+  const quranStatus = el('span', { class: 'model-status-text', id: 'tool-quran-search-status' });
+  const toolsFooter = el('div', { class: 'model-actions' }, quranStatus);
+
+  const toolsDivider = el('hr', { class: 'settings-divider' });
+  settingsPanel.append(
+    toolsDivider,
+    toolsHeader,
+    quranToggleRow,
+    toolsFooter,
   );
 
   // ─── Step management ───────────────────────────────────────────────────
@@ -518,6 +543,96 @@ export function mountChat(root, handlers) {
     }, 350);
   });
 
+  // ─── Tool toggle event handler ─────────────────────────────────────────
+  quranToggle.addEventListener('change', () => {
+    handlers.onToolToggle?.('quran_search', quranToggle.checked);
+  });
+
+  // ─── Extraction-sources rendering helpers ───────────────────────────────
+  // Called by main.js once the JSON extraction finishes and the parallel
+  // `executeQuranSearch` calls return. Renders a single `.extraction-sources`
+  // block at the bottom of the assistant message with one collapsible
+  // `.term-block` per term.
+  function beginSources(assistantEl, terms) {
+    if (!assistantEl || !terms?.length) return;
+    let section = assistantEl.querySelector('.extraction-sources');
+    if (!section) {
+      section = el('div', { class: 'extraction-sources', 'data-state': 'loading' });
+      assistantEl.querySelector('.message-content').append(section);
+    }
+    section.replaceChildren();
+    section.append(
+      el('div', { class: 'sources-header' },
+        el('span', { class: 'sources-icon' }, '🕌'),
+        el('span', { class: 'sources-title' },
+          `Looking up ${terms.length} term${terms.length === 1 ? '' : 's'}…`),
+      ),
+    );
+  }
+
+  function renderSources(assistantEl, results) {
+    if (!assistantEl || !Array.isArray(results)) return;
+    const section = assistantEl.querySelector('.extraction-sources');
+    if (!section) return;
+    section.dataset.state = 'ready';
+    section.replaceChildren();
+    const ok = results.filter((r) => r.result?.ok);
+    const bad = results.filter((r) => !r.result?.ok);
+    section.append(
+      el('div', { class: 'sources-header' },
+        el('span', { class: 'sources-icon' }, '🕌'),
+        el('span', { class: 'sources-title' },
+          `Sources · ${ok.length} of ${results.length} term${results.length === 1 ? '' : 's'} found`),
+      ),
+    );
+    if (bad.length > 0) {
+      const errs = el('div', { class: 'sources-errors' });
+      for (const b of bad) {
+        errs.append(el('div', { class: 'term-error' },
+          `${b.term}: ${b.result?.error ?? 'search failed'}`));
+      }
+      section.append(errs);
+    }
+    for (const { term, result } of results) {
+      if (!result?.ok) continue;
+      const block = el('div', { class: 'term-block' });
+      const header = el('div', { class: 'term-header', tabindex: '0', role: 'button' },
+        el('span', { class: 'term-name' }, term),
+        el('span', { class: 'term-count' },
+          result.results.length === 0
+            ? 'No verses'
+            : `${result.results.length} of ${result.total} verses`),
+        el('span', { class: 'term-caret' }, '▸'),
+      );
+      const verses = el('div', { class: 'term-verses', hidden: '' });
+      if (result.results.length === 0) {
+        verses.append(el('div', { class: 'term-empty' }, 'No matching verses.'));
+      } else {
+        for (const v of result.results) {
+          verses.append(
+            el('div', { class: 'verse' },
+              el('div', { class: 'verse-ref' }, v.reference),
+              el('div', { class: 'verse-text', lang: 'ar', dir: 'rtl' }, v.uthmani ?? ''),
+              el('div', { class: 'verse-meta' },
+                `${v.matchType ?? ''} · score ${v.matchScore ?? ''}`),
+            ),
+          );
+        }
+      }
+      const toggle = () => {
+        verses.hidden = !verses.hidden;
+        header.dataset.open = verses.hidden ? '' : 'true';
+        header.querySelector('.term-caret').textContent = verses.hidden ? '▸' : '▾';
+      };
+      header.addEventListener('click', toggle);
+      header.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+      });
+      block.append(header, verses);
+      section.append(block);
+    }
+  }
+
   // ─── Public controller ─────────────────────────────────────────────────
   return {
     // Loading overlay methods
@@ -736,6 +851,25 @@ export function mountChat(root, handlers) {
       outputFormatStatus.dataset.state = state;
       outputFormatStatus.textContent = message ?? '';
     },
+
+    // ─── Tools controller methods ─────────────────────────────────────────
+    setToolsAvailability({ quranSearch }) {
+      if (quranSearch) quranToggle.checked = !!quranSearch.enabled;
+    },
+
+    setToolStatus(name, { status, detail }) {
+      if (name !== 'quran_search') return;
+      quranStatus.dataset.state = status;
+      quranStatus.textContent =
+        status === 'idle'    ? 'Quran data: loads on first extraction' :
+        status === 'loading' ? '⏳ Loading Quran data…' :
+        status === 'ready'   ? '✅ Quran data ready' :
+        status === 'error'   ? `❌ ${detail ?? 'load failed'}` :
+                               '';
+    },
+
+    beginSources,
+    renderSources,
   };
 }
 
