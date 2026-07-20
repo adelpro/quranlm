@@ -1,8 +1,18 @@
 node_modules/
 dist/
 .vite/
-public/models/
 *.litertlm
 .DS_Store
 *.log
 .yarn/cache
+
+# Build / coverage artifacts
+coverage/
+*.tsbuildinfo
+
+# Editor
+.idea/
+.vscode/
+
+# OS
+Thumbs.db

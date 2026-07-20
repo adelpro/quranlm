@@ -1,15 +1,22 @@
-// System prompt presets. Add or edit freely — the UI picks them up from
-// `listPrompts()`. Each entry is `{ id, label, text }`; the UI shows `label`
-// in the dropdown and copies `text` into the system-prompt textarea when
-// selected.
-//
-// The quranic-ar prompt's "مخطط الـ JSON" block describes the JSON shape
-// the model must produce. The same shape is the default in
-// src/output-format.js (quranic terms). If you change one, change the other.
-//
-// Quran-search verses for each `related_words[].term` are looked up by
-// the client (src/main.js `autoSearchTerms`) — the model never calls a
-// tool in this flow.
+/**
+ * System prompt presets. Each entry is `{ id, label, text }`. The Settings
+ * UI shows `label` in a dropdown and copies `text` into the system-prompt
+ * textarea when selected.
+ *
+ * The quranic-ar prompt's "مخطط الـ JSON" block describes the JSON shape the
+ * model must produce. The same shape is the default in `data/output-format.ts`.
+ * Change both together.
+ *
+ * Quran-search verses for each `related_words[].term` are looked up by the
+ * client (see `features/quran/useQuranSearch.ts`) — the model never calls a
+ * tool in this flow.
+ */
+
+export interface PromptEntry {
+  readonly id: string;
+  readonly label: string;
+  readonly text: string;
+}
 
 export const PROMPTS = {
   'quranic-ar': {
@@ -56,15 +63,15 @@ export const PROMPTS = {
     label: 'Custom (empty)',
     text: '',
   },
-};
+} as const satisfies Record<string, PromptEntry>;
 
-// Set to whichever preset you want active on first load.
-export const DEFAULT_PROMPT_ID = 'quranic-ar';
+// Active on first load.
+export const DEFAULT_PROMPT_ID: PromptEntry['id'] = 'quranic-ar';
 
-export function listPrompts() {
+export function listPrompts(): readonly PromptEntry[] {
   return Object.values(PROMPTS);
 }
 
-export function getPrompt(id) {
-  return PROMPTS[id] ?? null;
+export function getPrompt(id: string): PromptEntry | null {
+  return (PROMPTS as Record<string, PromptEntry | undefined>)[id] ?? null;
 }
