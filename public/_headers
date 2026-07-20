@@ -1,0 +1,7 @@
+# Cross-origin isolation — required by LiteRT-LM's WASM (SharedArrayBuffer).
+# Mirrors vite.config.ts. Matches HTML, hashed JS/CSS under /assets/, and any
+# future nested paths. Read automatically by Netlify and Cloudflare Pages.
+/**
+  Cross-Origin-Opener-Policy: same-origin
+  Cross-Origin-Embedder-Policy: require-corp
+  Cross-Origin-Resource-Policy: cross-origin

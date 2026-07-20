@@ -216,10 +216,19 @@ src/
 
 ## Cross-origin isolation in production
 
-`vite.config.ts` sets the headers on `dev` and `preview` servers only. If
-you deploy `yarn build` output to a real host (GitHub Pages, Netlify,
-Cloudflare Pages, S3+CloudFront, …), you must set the same three headers on
-the production response:
+`vite.config.ts` sets the right headers on `dev` and `preview` only.
+Production hosts do not set them for you, so the deployed site is *not*
+cross-origin-isolated and `SharedArrayBuffer` is unavailable. LiteRT-LM's
+multi-threaded WASM build requires `SharedArrayBuffer`, so the engine
+throws `SharedArrayBuffer is not defined` as soon as you try to load a
+model.
+
+The three headers below tell the browser to (a) isolate the page from any
+window opened by another origin, (b) refuse to embed any cross-origin
+resource that doesn't explicitly opt in, and (c) let *our* resources be
+embedded by other cross-origin-isolated pages. Together they flip the page
+into "cross-origin-isolated" mode, and `SharedArrayBuffer` becomes
+available.
 
 | Header | Value |
 | --- | --- |
@@ -227,15 +236,77 @@ the production response:
 | `Cross-Origin-Embedder-Policy` | `require-corp` |
 | `Cross-Origin-Resource-Policy` | `cross-origin` |
 
-After deployment, open the browser console and verify:
+### For Netlify and Cloudflare Pages
 
-```js
-crossOriginIsolated === true
-typeof SharedArrayBuffer === 'function'
+Both hosts read [`public/_headers`](public/_headers) and
+[`public/_redirects`](public/_redirects) from the publish directory —
+Vite copies them into `dist/` at build time. Both files are already in
+this repo. Redeploy and you're done. (`_redirects` is unrelated to the
+COOP/COEP issue but required so reloading `/settings` doesn't 404 — the
+app uses client-side routing.)
+
+If you want to verify locally first:
+
+```bash
+yarn build && yarn preview   # http://localhost:4173
+curl -I http://localhost:4173 | grep -iE 'cross-origin'
 ```
 
-If `crossOriginIsolated` is `false`, the WebGPU engine will fail to load
-with `SharedArrayBuffer is not defined`.
+You should see all three headers in the response.
+
+### For Vercel
+
+Vercel does not read `_headers`. Add a `vercel.json` at the repo root with
+the same headers and an SPA-rewrite rule:
+
+```json
+{
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Cross-Origin-Opener-Policy",   "value": "same-origin" },
+        { "key": "Cross-Origin-Embedder-Policy", "value": "require-corp" },
+        { "key": "Cross-Origin-Resource-Policy", "value": "cross-origin" }
+      ]
+    }
+  ],
+  "rewrites": [{ "source": "/(.*)", "destination": "/index.html" }]
+}
+```
+
+### For GitHub Pages
+
+GitHub Pages has no mechanism to set response headers. This app requires
+`SharedArrayBuffer`, which is unreachable on GitHub Pages. Use Netlify or
+Cloudflare Pages instead. If you must use GH Pages, put Cloudflare in
+front of it and configure the headers on Cloudflare.
+
+### For S3 + CloudFront, Firebase Hosting, or other custom hosts
+
+Configure the three headers at the host layer:
+
+- **CloudFront:** create a response-headers policy with the three
+  headers and attach it to the cache behavior for `Default(*)` and
+  `/assets/*`.
+- **Firebase Hosting:** add a `headers` block to `firebase.json` with
+  the three headers on `"source": "**"`, plus a `rewrites` block with
+  `"source": "**", "destination": "/index.html"`.
+- **Other hosts:** consult your host's docs for the equivalent of
+  Netlify's `_headers` file.
+
+### Verify in the browser
+
+Open the deployed site, open DevTools → Console, and run:
+
+```js
+crossOriginIsolated                       // → true
+typeof SharedArrayBuffer === 'function'   // → true
+```
+
+If the first is `false`, the headers didn't reach the response — check the
+Network tab on the *document* request (the top-level `index.html`), not on
+a sub-resource.
 
 ## Customizing the model
 

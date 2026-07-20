@@ -1,0 +1,3 @@
+# SPA fallback for react-router-dom. Lets client-side routes survive a refresh.
+# Read automatically by Netlify and Cloudflare Pages.
+/*    /index.html   200
