@@ -1,5 +1,5 @@
 /**
- * Loading-overlay step atoms + simple UI toggles.
+ * Loading-overlay step atoms.
  */
 
 import { atom } from 'jotai';
@@ -23,6 +23,3 @@ export const loadingStepsAtom = atom<LoadingStep[]>([
 ]);
 
 export const loadingOverlayVisibleAtom = atom<boolean>(true);
-
-/** Settings drawer toggle. Both Header and StatusBar can open it. */
-export const settingsOpenAtom = atom<boolean>(false);

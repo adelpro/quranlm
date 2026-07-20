@@ -135,3 +135,34 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-muted);
 }
+
+/* ─── Settings page motion ───────────────────────────────────────── */
+/* One-shot card entrance for the settings page. Each section sets its
+ * --i CSS variable to its position (0, 1, 2, …) and the animation
+ * delay is staggered from there. Respects prefers-reduced-motion so
+ * users with that preference get the same final state without the
+ * transform. */
+@keyframes card-reveal {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.card-reveal {
+  opacity: 0;
+  animation: card-reveal 240ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation-delay: calc(var(--i, 0) * 80ms);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .card-reveal {
+    animation: none;
+    opacity: 1;
+    transform: none;
+  }
+}
