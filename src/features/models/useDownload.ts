@@ -17,7 +17,10 @@ import { appStore } from '../../app/store';
 import { trackerStore } from '../loading/useStepTracker';
 import type { ModelId } from '../../data/models';
 
-const EMA_ALPHA = 0.3;
+const EMA_ALPHA = 0.4;
+/** Minimum gap between progress readout updates, in ms. Throttles the noisy
+ *  per-chunk stream so speed/ETA read as a calm ~2s window average. */
+const EMIT_INTERVAL_MS = 2000;
 
 export function useDownload() {
   const setProgress = useSetAtom(downloadProgressAtom);
@@ -47,6 +50,7 @@ export function useDownload() {
       let lastTick = performance.now();
       let lastDownloaded = 0;
       let emaSpeed = 0;
+      let lastPhase = 'fetching';
       const myOpId = opId + 1;
       appStore.set(modelOperationIdAtom, myOpId);
 
@@ -61,13 +65,28 @@ export function useDownload() {
             // Ignore progress from stale operations.
             if (appStore.get(modelOperationIdAtom) !== myOpId) return;
 
+            const phase = (p.phase as DownloadProgress['phase']) ?? 'fetching';
+            const phaseChanged = phase !== lastPhase;
             const now = performance.now();
-            const dtSec = Math.max(0.001, (now - lastTick) / 1000);
-            const dBytes = p.downloaded - lastDownloaded;
-            const instant = dBytes / dtSec;
-            emaSpeed = emaSpeed === 0 ? instant : EMA_ALPHA * instant + (1 - EMA_ALPHA) * emaSpeed;
-            lastTick = now;
-            lastDownloaded = p.downloaded;
+            const elapsed = now - lastTick;
+
+            // Throttle noisy per-chunk 'fetching' updates: only emit once a full
+            // window has elapsed. Phase transitions (verifying/storing/…) always
+            // pass through immediately so their labels never lag or get swallowed.
+            if (phase === 'fetching' && !phaseChanged && elapsed < EMIT_INTERVAL_MS) {
+              return;
+            }
+
+            // Recompute speed only from real 'fetching' progress over the window.
+            if (phase === 'fetching') {
+              const dtSec = Math.max(0.001, elapsed / 1000);
+              const dBytes = p.downloaded - lastDownloaded;
+              const instant = dBytes / dtSec;
+              emaSpeed = emaSpeed === 0 ? instant : EMA_ALPHA * instant + (1 - EMA_ALPHA) * emaSpeed;
+              lastTick = now;
+              lastDownloaded = p.downloaded;
+            }
+            lastPhase = phase;
 
             const eta =
               emaSpeed > 0 && p.total !== null && p.total > 0
@@ -75,7 +94,7 @@ export function useDownload() {
                 : undefined;
 
             setProgress({
-              phase: (p.phase as DownloadProgress['phase']) ?? 'fetching',
+              phase,
               modelId,
               downloaded: p.downloaded,
               total: p.total,
