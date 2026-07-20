@@ -1514,29 +1514,6 @@ __metadata:
   languageName: node
   linkType: hard
 
-"litert-lm-experiment@workspace:.":
-  version: 0.0.0-use.local
-  resolution: "litert-lm-experiment@workspace:."
-  dependencies:
-    "@litert-lm/core": "npm:0.14.0"
-    "@tailwindcss/vite": "npm:^4.0.0"
-    "@types/node": "npm:^22.10.0"
-    "@types/react": "npm:^19.0.0"
-    "@types/react-dom": "npm:^19.0.0"
-    "@vitejs/plugin-react": "npm:^4.3.0"
-    "@webgpu/types": "npm:^0.1.50"
-    jotai: "npm:^2.10.0"
-    quran-search-engine: "npm:^0.3.2"
-    react: "npm:^19.0.0"
-    react-dom: "npm:^19.0.0"
-    react-router-dom: "npm:^7"
-    tailwindcss: "npm:^4.0.0"
-    typescript: "npm:^5.7.0"
-    vite: "npm:^5.4.0"
-    vitest: "npm:^2.1.0"
-  languageName: unknown
-  linkType: soft
-
 "loupe@npm:^3.1.0, loupe@npm:^3.1.2":
   version: 3.2.1
   resolution: "loupe@npm:3.2.1"
@@ -1686,6 +1663,29 @@ __metadata:
   checksum: 10c0/48681492bf3bd616a2d4cc7240643c2d82c6d2e7afe75f20fdf3732f59526e447fa5be370ea72ea3f3f258bf1c01d1f5971d7aec735ddb181eb2ee26d948b6e9
   languageName: node
   linkType: hard
+
+"quranlm@workspace:.":
+  version: 0.0.0-use.local
+  resolution: "quranlm@workspace:."
+  dependencies:
+    "@litert-lm/core": "npm:0.14.0"
+    "@tailwindcss/vite": "npm:^4.0.0"
+    "@types/node": "npm:^22.10.0"
+    "@types/react": "npm:^19.0.0"
+    "@types/react-dom": "npm:^19.0.0"
+    "@vitejs/plugin-react": "npm:^4.3.0"
+    "@webgpu/types": "npm:^0.1.50"
+    jotai: "npm:^2.10.0"
+    quran-search-engine: "npm:^0.3.2"
+    react: "npm:^19.0.0"
+    react-dom: "npm:^19.0.0"
+    react-router-dom: "npm:^7"
+    tailwindcss: "npm:^4.0.0"
+    typescript: "npm:^5.7.0"
+    vite: "npm:^5.4.0"
+    vitest: "npm:^2.1.0"
+  languageName: unknown
+  linkType: soft
 
 "react-dom@npm:^19.0.0":
   version: 19.2.7

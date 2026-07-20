@@ -1,7 +1,7 @@
 {
-  "name": "litert-lm-experiment",
+  "name": "quranlm",
   "version": "0.1.0",
-  "description": "Browser-side LLM playground using Google's LiteRT-LM Web API.",
+  "description": "A private, offline AI companion for the Quran. Ask, search, and explore — entirely in your browser, no server, no telemetry.",
   "private": true,
   "type": "module",
   "scripts": {
