@@ -977,6 +977,8 @@ body {
   accent-color: var(--accent);
 }
 
+/* ─── Quran-search results panel (auto-search after extraction) ──────── */
+
 .extraction-sources {
   margin-top: 14px;
   border-left: 3px solid var(--accent);
@@ -986,10 +988,6 @@ body {
   font-size: 13px;
 }
 
-.extraction-sources[data-state="loading"] .sources-header .sources-title::after {
-  content: "";
-}
-
 .extraction-sources .sources-header {
   display: flex;
   align-items: center;
@@ -997,10 +995,6 @@ body {
   font-weight: 600;
   color: var(--text);
   margin-bottom: 8px;
-}
-
-.extraction-sources .sources-icon {
-  font-size: 14px;
 }
 
 .extraction-sources .sources-title {

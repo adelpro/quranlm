@@ -607,13 +607,7 @@ async function autoSearchTerms(assistantEl, text) {
 
   const parsed = extractJsonFromReply(text);
   if (!parsed) {
-    // Render an error state so the user sees what happened instead of nothing.
-    ui.beginSources(assistantEl, ['(reply was not JSON)']);
-    ui.renderSources(assistantEl, [{
-      term: '(reply was not JSON)',
-      result: { ok: false, error: 'Reply did not contain JSON. Raw output shown below.' },
-    }]);
-    // Append the raw text to the message so the user can inspect it.
+    // Reply wasn't JSON — surface the raw text so the user sees what the model said.
     const pre = document.createElement('pre');
     pre.className = 'raw-reply-fallback';
     pre.textContent = text;
@@ -628,7 +622,7 @@ async function autoSearchTerms(assistantEl, text) {
     .filter(Boolean);
 
   if (terms.length === 0) {
-    // No terms to look up — still surface a Sources header so the user knows
+    // No terms to look up — still surface a tiny section so the user knows
     // the post-extraction step ran and observed an empty array.
     ui.beginSources(assistantEl, ['(no related terms)']);
     ui.renderSources(assistantEl, [{

@@ -548,11 +548,11 @@ export function mountChat(root, handlers) {
     handlers.onToolToggle?.('quran_search', quranToggle.checked);
   });
 
-  // ─── Extraction-sources rendering helpers ───────────────────────────────
-  // Called by main.js once the JSON extraction finishes and the parallel
-  // `executeQuranSearch` calls return. Renders a single `.extraction-sources`
-  // block at the bottom of the assistant message with one collapsible
-  // `.term-block` per term.
+  // ─── Quran-search result rendering ───────────────────────────────────────
+  // After the JSON extraction, the panel below the JSON renders a per-term
+  // collapsible block of verses. The 🕌 emoji was removed on user request;
+  // the rest of the visual structure (bordered panel, expandable terms,
+  // match score metadata) stays.
   function beginSources(assistantEl, terms) {
     if (!assistantEl || !terms?.length) return;
     let section = assistantEl.querySelector('.extraction-sources');
@@ -563,7 +563,6 @@ export function mountChat(root, handlers) {
     section.replaceChildren();
     section.append(
       el('div', { class: 'sources-header' },
-        el('span', { class: 'sources-icon' }, '🕌'),
         el('span', { class: 'sources-title' },
           `Looking up ${terms.length} term${terms.length === 1 ? '' : 's'}…`),
       ),
@@ -572,15 +571,17 @@ export function mountChat(root, handlers) {
 
   function renderSources(assistantEl, results) {
     if (!assistantEl || !Array.isArray(results)) return;
-    const section = assistantEl.querySelector('.extraction-sources');
-    if (!section) return;
+    let section = assistantEl.querySelector('.extraction-sources');
+    if (!section) {
+      section = el('div', { class: 'extraction-sources' });
+      assistantEl.querySelector('.message-content').append(section);
+    }
     section.dataset.state = 'ready';
     section.replaceChildren();
     const ok = results.filter((r) => r.result?.ok);
     const bad = results.filter((r) => !r.result?.ok);
     section.append(
       el('div', { class: 'sources-header' },
-        el('span', { class: 'sources-icon' }, '🕌'),
         el('span', { class: 'sources-title' },
           `Sources · ${ok.length} of ${results.length} term${results.length === 1 ? '' : 's'} found`),
       ),
