@@ -4,7 +4,8 @@
  * Spec: https://wicg.github.io/cross-origin-storage/
  *
  * Key points:
- * - `requestFileHandles()` (plural) returns `FileSystemFileHandle[]`
+ * - `getFileHandle()` returns a single `FileSystemFileHandle`; the older
+ *   `requestFileHandle()` and plural `requestFileHandles()` are fallbacks
  * - Write handles are write-only — `getFile()` fails on them
  * - Reading requires transient activation (user interaction)
  * - Hash verification is automatic during write
@@ -27,8 +28,12 @@ function getCOS(): CrossOriginStorage | null {
   if (typeof navigator === 'undefined') return null;
   const cos = navigator.crossOriginStorage;
   if (!cos) return null;
-  // Either the singular or the plural form must exist.
-  if (typeof cos.requestFileHandle !== 'function' && typeof cos.requestFileHandles !== 'function') {
+  // The current name or one of its predecessors must exist.
+  if (
+    typeof cos.getFileHandle !== 'function' &&
+    typeof cos.requestFileHandle !== 'function' &&
+    typeof cos.requestFileHandles !== 'function'
+  ) {
     return null;
   }
   return cos;
@@ -71,9 +76,8 @@ export async function writeToCOS(
     // Clean slate — delete any pre-existing file at this hash.
     await deleteFromCOS(hashObj);
 
-    // Prefer the singular form per WICG deprecation
-    // (https://github.com/WICG/cross-origin-storage/issues/61); fall back to
-    // the legacy plural form.
+    // Prefer `getFileHandle()` (https://github.com/WICG/cross-origin-storage/pull/86);
+    // fall back to the older `requestFileHandle()` and plural forms.
     console.log('[COS] Requesting write handle...');
     const handle = await requestHandle(cos, hashObj, { create: true, origins });
     if (!handle) {
@@ -105,6 +109,9 @@ async function requestHandle(
   hashObj: HashObject,
   options?: CrossOriginStorageOptions,
 ): Promise<FileSystemFileHandle | null> {
+  if (typeof cos.getFileHandle === 'function') {
+    return cos.getFileHandle(hashObj, options);
+  }
   if (typeof cos.requestFileHandle === 'function') {
     return cos.requestFileHandle(hashObj, options);
   }

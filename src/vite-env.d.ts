@@ -15,7 +15,12 @@ interface CrossOriginStorageOptions {
 }
 
 interface CrossOriginStorage {
-  // Newer (singular) form — see https://github.com/WICG/cross-origin-storage/issues/61
+  // Current name — see https://github.com/WICG/cross-origin-storage/pull/86
+  getFileHandle?(
+    hash: unknown,
+    options?: CrossOriginStorageOptions,
+  ): Promise<FileSystemFileHandle | null>;
+  // Previous name of `getFileHandle()`, still used by some implementations.
   requestFileHandle?(
     hash: unknown,
     options?: CrossOriginStorageOptions,
